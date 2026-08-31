@@ -1,0 +1,46 @@
+name: Draft Recommendation Feedback
+description: Report a pick, roster grade, or simulation behavior that should improve.
+title: "[Draft feedback]: "
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: What needs improvement?
+      options:
+        - Pick recommendation
+        - Opponent draft behavior
+        - Player projection or ranking
+        - Roster grade
+        - Interface or accessibility
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: draft-context
+    attributes:
+      label: Draft context
+      description: Include league size, draft slot, round, scoring format, and roster if relevant.
+      placeholder: "10 teams, pick 6, Round 5, PPR; roster: RB, RB, WR, WR"
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: Name the recommendation or behavior you observed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What would have been better?
+      description: Explain the alternative and why it improves the draft.
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Data check
+      options:
+        - label: I did not include private league credentials or personal information.
+          required: true

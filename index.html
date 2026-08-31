@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#461d7c">
+  <meta name="description" content="Run live fantasy football mock drafts with value-based recommendations, probabilistic tiers, roster grades, and next-pick availability.">
+  <meta property="og:title" content="War Room — Fantasy Draft Picker">
+  <meta property="og:description" content="A live fantasy football draft simulator with explainable pick recommendations.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://vbui31.github.io/Fantasy-Football-Picker/">
+  <link rel="canonical" href="https://vbui31.github.io/Fantasy-Football-Picker/">
+  <title>War Room — Fantasy Draft Picker</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#draftBoard">Skip to draft board</a>
+  <div class="app-shell">
+    <header class="masthead">
+      <a class="brand" href="./" aria-label="War Room home">
+        <span class="brand-mark" aria-hidden="true">WR</span>
+        <span><strong>War Room</strong><small>Fantasy draft intelligence</small></span>
+      </a>
+      <div class="header-actions">
+        <span class="model-state" id="modelState">Registry model</span>
+        <span class="save-state" id="saveState"><i></i> Saved locally</span>
+        <button class="icon-button" id="undoButton" type="button" title="Undo last pick" aria-label="Undo last pick">↶</button>
+        <button class="button button-quiet header-results" id="viewLeagueButton" type="button">League Results</button>
+        <button class="button button-dark" id="settingsButton" type="button">Draft Setup</button>
+      </div>
+    </header>
+
+    <section class="clock-ribbon" aria-label="Draft status">
+      <div class="clock-label"><span>On the clock</span><strong id="clockTeam">Team 1</strong></div>
+      <div class="clock-pick"><span id="roundLabel">Round 1</span><strong id="pickLabel">Pick 1.01</strong></div>
+      <div class="clock-track" id="clockTrack" aria-label="Round pick progress"></div>
+      <div class="simulation-actions">
+        <button class="button button-outline" id="fullSimButton" type="button">Simulate Full Draft</button>
+        <button class="button button-gold" id="simulateButton" type="button">Run to My Pick</button>
+      </div>
+    </section>
+
+    <main class="draft-layout">
+      <section class="board-panel panel" id="draftBoard" tabindex="-1">
+        <div class="section-heading">
+          <div><p class="eyebrow">Live player pool</p><h1>Draft board</h1></div>
+          <div class="pool-count"><strong id="poolCount">—</strong><span>available</span></div>
+        </div>
+
+        <div class="board-tools">
+          <label class="search-box">
+            <span aria-hidden="true">⌕</span>
+            <input id="searchInput" name="player-search" type="search" placeholder="Search player or team…" autocomplete="off" aria-label="Search players">
+          </label>
+          <div class="position-filters" id="positionFilters" aria-label="Filter by position"></div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="player-table">
+            <thead><tr><th>RK</th><th>Player</th><th>Pos</th><th>Est. pts</th><th>VBD</th><th>Signal</th><th><span class="sr-only">Action</span></th></tr></thead>
+            <tbody id="playerRows"></tbody>
+          </table>
+        </div>
+        <div class="method-note"><span>MODEL NOTE</span><p id="methodology">Loading player model…</p></div>
+      </section>
+
+      <aside class="side-column">
+        <section class="recommendation panel" aria-labelledby="recommendationTitle">
+          <div class="recommendation-kicker"><span>Best move now</span><span id="confidence">—</span></div>
+          <div id="recommendationCard" class="recommendation-card">
+            <div class="skeleton"></div>
+          </div>
+          <div class="alternatives" id="alternatives"></div>
+        </section>
+
+        <section class="roster-panel panel">
+          <div class="section-heading compact">
+            <div><p class="eyebrow">Your build</p><h2 id="rosterTitle">Team 1 roster</h2></div>
+            <span class="roster-grade" id="rosterGrade">—</span>
+          </div>
+          <div class="needs-strip" id="needsStrip"></div>
+          <div class="roster-list" id="rosterList"></div>
+        </section>
+
+        <section class="history-panel panel">
+          <div class="section-heading compact"><div><p class="eyebrow">League wire</p><h2>Recent picks</h2></div></div>
+          <div class="history-list" id="historyList"></div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <dialog id="setupDialog" aria-labelledby="setupTitle">
+    <form method="dialog" id="setupForm">
+      <div class="dialog-heading"><div><p class="eyebrow">League configuration</p><h2 id="setupTitle">Set the draft room</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+      <label>Teams<select id="teamCount" name="teams"><option>8</option><option selected>10</option><option>12</option><option>14</option></select></label>
+      <label>Your draft slot<select id="userSlot" name="user-slot"></select></label>
+      <label>Rounds<select id="roundCount" name="rounds"><option>12</option><option selected>15</option><option>16</option><option>18</option></select></label>
+      <label>Simulation pace<select id="simulationPace" name="simulation-pace"><option value="0">Instant</option><option value="220" selected>Fast · 0.2 seconds</option><option value="650">Live · 0.7 seconds</option></select></label>
+      <label class="check-row"><input type="checkbox" id="autoOpponents" name="auto-opponents" checked><span><strong>Auto-Pick Opponents</strong><small>Advance the room back to your next selection.</small></span></label>
+      <fieldset class="projection-import">
+        <legend>Projection engine</legend>
+        <div class="import-heading"><strong>ffanalytics consensus</strong><a href="https://github.com/FantasyFootballAnalytics/ffanalytics" target="_blank" rel="noopener noreferrer">View repository ↗</a></div>
+        <p>Import a CSV produced by <code>projections_table()</code> to replace registry estimates with multi-source projections, tiers, ranges, ADP, and uncertainty.</p>
+        <label class="file-button" for="projectionFile">Choose ffanalytics CSV</label>
+        <input id="projectionFile" name="projection-file" type="file" accept=".csv,text/csv">
+        <div class="import-status" id="importStatus">No consensus file loaded.</div>
+        <button class="text-button" id="clearModelButton" type="button">Restore Registry Estimates</button>
+      </fieldset>
+      <div class="dialog-actions"><button class="button button-quiet" value="cancel">Keep Current Draft</button><button class="button button-gold" id="newDraftButton" value="default">Start New Draft</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="leagueDialog" class="league-dialog" aria-labelledby="leagueTitle">
+    <div class="league-dialog-inner">
+      <div class="dialog-heading"><div><p class="eyebrow">Draft Room Report</p><h2 id="leagueTitle">League Results</h2></div><button class="icon-button" id="closeLeagueButton" type="button" aria-label="Close league results">×</button></div>
+      <p class="league-summary" id="leagueSummary">Team grades update after every pick.</p>
+      <div class="league-grid" id="leagueGrid"></div>
+      <div class="feedback-callout"><div><strong>See a Bad Pick?</strong><span>Share the round, roster context, and recommendation so the model can improve.</span></div><a class="button button-dark" href="https://github.com/vbui31/Fantasy-Football-Picker/issues/new?template=draft-feedback.yml" target="_blank" rel="noopener noreferrer">Send Feedback ↗</a></div>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js" type="module"></script>
+</body>
+</html>
