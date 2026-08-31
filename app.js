@@ -1,6 +1,7 @@
 import { enrichPlayerModel, scoreCandidate } from "./draft-model.js";
 import { buildProjectionDataset, normalizedName, parseCsv } from "./ffanalytics-data.js";
 import { backtestCompletedDraft, createOpponentBeliefs, dominantOpponentStyle, evaluateRoster, expectedOpponentBias, normalizeLeagueSettings, runMonteCarloRestOfDraft, updateOpponentBelief } from "./draft-intelligence.js";
+import { createDraftId, getDraftLogs, historicalCalibration, putDraftLog, settingsFingerprint, validateExternalGradeResponse } from "./draft-audit.js";
 
 const POSITIONS = ["ALL", "RB", "WR", "QB", "TE", "FLEX", "K", "DST"];
 const OPPONENT_PROFILE = {
@@ -9,6 +10,9 @@ const OPPONENT_PROFILE = {
   medianFirstRound: { QB: 7, TE: 7, K: 15, DST: 14 }
 };
 const STORAGE_KEY = "war-room-draft-v1";
+const GRADER_ENDPOINT_KEY = "war-room-grader-endpoint-v1";
+const GRADER_TOKEN_KEY = "war-room-grader-token-v1";
+const GRADE_MODEL_VERSION = "ppr-grade-v2";
 
 const elements = Object.fromEntries([
   "playerRows", "poolCount", "searchInput", "positionFilters", "methodology", "clockTeam", "roundLabel",
@@ -20,7 +24,7 @@ const elements = Object.fromEntries([
   "scarcityPanel", "compareDialog", "closeCompareButton", "compareContent", "draftPreset", "draftFormat", "scoringFormat",
   "slotQB", "slotRB", "slotWR", "slotTE", "slotFlex", "slotSuperflex", "slotK", "slotDST", "tePremium", "auctionBudget",
   "sleeperLeagueId", "importSleeperButton", "sleeperImportStatus", "keepersInput", "tradedPicksInput", "exportDraftButton",
-  "shareDraftButton", "runBacktestButton"
+  "shareDraftButton", "runBacktestButton", "draftLogButton", "externalGradeButton", "graderAudit", "graderEndpoint", "graderToken", "graderConfigStatus"
 ].map((id) => [id, document.getElementById(id)]));
 
 let dataset;
@@ -31,20 +35,21 @@ let simulationNonce = 0;
 let isSimulating = false;
 let comparisonSelection = new Set();
 let monteCarlo = { key: null, results: null, running: false };
+let draftHistory = [];
 let state = loadState();
 
 function defaultState() {
   const settings = normalizeLeagueSettings({ teams: 10, userSlot: 5, rounds: 15, autoOpponents: true, simulationPace: 220, preset: "balanced" });
-  return { version: 2, settings, picks: [], keepers: [], tradedPicks: {}, cursor: 0, model: null, opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot), feedback: [], leagueImport: null, simulationSeed: Math.floor(Math.random() * 2 ** 31) };
+  return { version: 3, draftId: createDraftId(), startedAt: new Date().toISOString(), settings, picks: [], keepers: [], tradedPicks: {}, cursor: 0, model: null, opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot), feedback: [], leagueImport: null, externalGrade: null, simulationSeed: Math.floor(Math.random() * 2 ** 31) };
 }
 
 function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if ([1, 2].includes(saved?.version) && Array.isArray(saved.picks)) {
+    if ([1, 2, 3].includes(saved?.version) && Array.isArray(saved.picks)) {
       const defaults = defaultState();
       const settings = normalizeLeagueSettings({ ...defaults.settings, ...saved.settings });
-      return { ...defaults, ...saved, version: 2, settings, keepers: saved.keepers || [], tradedPicks: saved.tradedPicks || {}, cursor: Number.isInteger(saved.cursor) ? saved.cursor : saved.picks.length, opponentBeliefs: saved.opponentBeliefs || createOpponentBeliefs(settings.teams, settings.userSlot), feedback: saved.feedback || [] };
+      return { ...defaults, ...saved, version: 3, draftId: saved.draftId || createDraftId(), startedAt: saved.startedAt || new Date().toISOString(), settings, keepers: saved.keepers || [], tradedPicks: saved.tradedPicks || {}, cursor: Number.isInteger(saved.cursor) ? saved.cursor : saved.picks.length, opponentBeliefs: saved.opponentBeliefs || createOpponentBeliefs(settings.teams, settings.userSlot), feedback: saved.feedback || [], externalGrade: saved.externalGrade || null };
     }
   } catch { /* A fresh board is safer than a broken saved state. */ }
   return defaultState();
@@ -451,20 +456,31 @@ function renderLeagueResults() {
     const players = draftedPlayersForTeam(team);
     const evaluation = evaluateRoster(players, state.settings, leagueRosters);
     return { team, players, score: evaluation.score, grade: rosterGrade(players), evaluation };
-  }).sort((a, b) => b.score - a.score);
+  }).sort((a, b) => b.score - a.score).map((row, index, rows) => ({ ...row, roomPercentile: rows.length > 1 ? (1 - index / (rows.length - 1)) * 100 : 50 }));
   const leader = teamRows[0];
   elements.leagueSummary.textContent = state.picks.length
     ? `${state.picks.length + state.keepers.length} of ${state.settings.teams * state.settings.rounds} roster slots filled in this PPR room. ${teamName(leader.team)} currently leads the room.`
     : "Team grades update after every pick and compare value, projected output, and roster coverage.";
-  elements.leagueGrid.innerHTML = teamRows.map(({ team, players, grade, evaluation }, index) => {
+  const userRow = teamRows.find((row) => row.team === state.settings.userSlot);
+  const calibration = historicalCalibration(userRow?.score, draftHistory, { ...state.settings, gradeVersion: GRADE_MODEL_VERSION }, state.draftId);
+  const externalByTeam = new Map((state.externalGrade?.teams || []).map((entry) => [entry.team, entry]));
+  const externalPercentile = new Map([...(state.externalGrade?.teams || [])].sort((a, b) => b.score - a.score).map((entry, index, rows) => [entry.team, rows.length > 1 ? (1 - index / (rows.length - 1)) * 100 : 50]));
+  elements.graderAudit.innerHTML = state.externalGrade
+    ? `<strong>Independent audit · ${escapeHtml(state.externalGrade.provider)}</strong><span>${escapeHtml(state.externalGrade.methodology)} · ${escapeHtml(state.externalGrade.modelVersion)} · ${new Date(state.externalGrade.gradedAt).toLocaleString()}</span>`
+    : `<strong>Local model only</strong><span>No independent grade has been requested. Local grades are relative to this room and are not objective truth.</span>`;
+  if (calibration.sampleSize) elements.graderAudit.innerHTML += `<span>Your raw roster score is at the ${Math.round(calibration.percentile * 100)}th percentile across ${calibration.sampleSize} prior completed drafts with matching settings. Historical comparison is context, not ground truth.</span>`;
+  elements.leagueGrid.innerHTML = teamRows.map(({ team, players, grade, evaluation, roomPercentile }, index) => {
     const counts = countPositions(players);
     const style = dominantOpponentStyle(state.opponentBeliefs[team]);
     const spent = state.picks.filter((pick) => pick.team === team).reduce((sum, pick) => sum + (pick.price || 0), 0);
     const budgetLine = state.settings.draftFormat === "auction" ? `<span>$${spent} spent · $${state.settings.auctionBudget - spent} left</span>` : "";
+    const external = externalByTeam.get(team);
+    const disagreement = external ? Math.abs((externalPercentile.get(team) ?? 50) - roomPercentile) : 0;
+    const externalLine = external ? `<span class="external-score ${disagreement >= 20 ? "disagrees" : ""}">External ${escapeHtml(external.grade)} · ${external.score.toFixed(1)}/100${disagreement >= 20 ? " · rank disagreement" : ""}</span>` : "";
     const explanation = evaluation.explanations.slice(0, 4).map((item) => `<span><strong>${escapeHtml(item.label)}</strong><br>${escapeHtml(item.value)}</span>`).join("");
     return `<article class="team-card ${team === state.settings.userSlot ? "is-user" : ""}">
       <header><div><span>${index === 0 && players.length ? "ROOM LEADER" : `DRAFT SLOT ${team + 1}`} · ${team === state.settings.userSlot ? "RECOMMENDATION MODEL" : `${escapeHtml(style.name.toUpperCase())} ${Math.round(style.confidence * 100)}%`}</span><h3>${escapeHtml(teamName(team))}</h3></div><strong>${grade}</strong></header>
-      <div class="team-card-stats"><span>${players.length} players</span><span>${evaluation.weekly.toFixed(1)} PPR/wk</span><span>${Math.round(evaluation.expectedWins * 100)}% expected wins</span>${budgetLine}<span>QB ${counts.QB || 0} · RB ${counts.RB || 0} · WR ${counts.WR || 0} · TE ${counts.TE || 0}</span></div>
+      <div class="team-card-stats"><span>${players.length} players</span><span>${evaluation.weekly.toFixed(1)} PPR/wk</span><span>${Math.round(evaluation.expectedWins * 100)}% expected wins</span>${budgetLine}${externalLine}<span>QB ${counts.QB || 0} · RB ${counts.RB || 0} · WR ${counts.WR || 0} · TE ${counts.TE || 0}</span></div>
       <div class="grade-explain">${explanation}</div>
       <ol>${players.map((player) => `<li><span class="pos-badge pos-${player.position}">${player.position}</span><strong>${escapeHtml(player.name)}</strong><small>${player.team}</small></li>`).join("") || "<li class=\"team-empty\">No picks yet.</li>"}</ol>
     </article>`;
@@ -490,6 +506,7 @@ function draftPlayer(playerId, isAuto = false) {
   state.opponentBeliefs[context.team] = updateOpponentBelief(state.opponentBeliefs[context.team], { player, rosterBefore, round: context.round, pickNumber: context.overall, recentPicks: recentDraftedPlayers() });
   const price = state.settings.draftFormat === "auction" ? suggestedAuctionPrice(player) : null;
   state.picks.push({ playerId, team: context.team, index: context.overall - 1, price });
+  state.externalGrade = null;
   state.cursor = nextOpenDraftIndex(context.overall);
   monteCarlo = { key: null, results: null, running: false };
   saveState();
@@ -498,6 +515,7 @@ function draftPlayer(playerId, isAuto = false) {
     showToast(`${player.name} ${price ? `won for $${price}` : "drafted"} by ${teamName(context.team)}`);
     if (state.settings.autoOpponents && !isComplete()) setTimeout(runToUserPick, 180);
   }
+  if (isComplete() || state.picks.length % state.settings.teams === 0) void logCurrentDraft(isComplete() ? "complete" : "in-progress");
 }
 
 function autoPick() {
@@ -561,6 +579,7 @@ function undo() {
   }
   state.cursor = state.picks.length ? nextOpenDraftIndex(state.picks[state.picks.length - 1].index + 1) : 0;
   rebuildOpponentBeliefs();
+  state.externalGrade = null;
   monteCarlo = { key: null, results: null, running: false };
   saveState();
   renderAll();
@@ -693,16 +712,20 @@ function openSetup() {
   elements.sleeperLeagueId.value = state.leagueImport?.leagueId || "";
   elements.keepersInput.value = state.keepers.map((keeper) => `Team ${keeper.team + 1}: ${dataset.players.find((player) => player.id === keeper.playerId)?.name || keeper.playerId}`).join("\n");
   elements.tradedPicksInput.value = Object.entries(state.tradedPicks).map(([pick, team]) => `${pick}: Team ${team + 1}`).join("\n");
+  elements.graderEndpoint.value = localStorage.getItem(GRADER_ENDPOINT_KEY) || "";
+  elements.graderToken.value = sessionStorage.getItem(GRADER_TOKEN_KEY) || "";
+  elements.graderConfigStatus.textContent = elements.graderEndpoint.value ? "Endpoint saved on this device. Bearer tokens remain in this browser tab only." : "No external grader configured. API credentials are never saved in the draft report.";
   setRosterSlotFields(state.settings.rosterSlots);
   populateSlots();
   recalculateModel();
   elements.setupDialog.showModal();
 }
 
-function startNewDraft(event) {
+async function startNewDraft(event) {
   event.preventDefault();
   simulationNonce++;
   isSimulating = false;
+  await logCurrentDraft(isComplete() ? "complete" : "abandoned");
   const settings = normalizeLeagueSettings({
       teams: Number(elements.teamCount.value),
       userSlot: Number(elements.userSlot.value),
@@ -716,7 +739,9 @@ function startNewDraft(event) {
       preset: elements.draftPreset.value
   });
   state = {
-    version: 2,
+    version: 3,
+    draftId: createDraftId(),
+    startedAt: new Date().toISOString(),
     settings,
     picks: [],
     cursor: 0,
@@ -724,8 +749,9 @@ function startNewDraft(event) {
     tradedPicks: parseTradedPicks(elements.tradedPicksInput.value),
     model: state.model,
     opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot),
-    feedback: state.feedback || [],
+    feedback: [],
     leagueImport: state.leagueImport,
+    externalGrade: null,
     simulationSeed: Math.floor(Math.random() * 2 ** 31)
   };
   comparisonSelection.clear();
@@ -783,6 +809,7 @@ document.addEventListener("click", (event) => {
   const feedback = event.target.closest("[data-feedback]");
   if (feedback) recordRecommendationFeedback(feedback.dataset.feedback, feedback.dataset.player);
   if (event.target.closest("[data-open-results]")) openLeagueResults();
+  if (event.target.closest("[data-export-ledger]")) void exportDraftLedger();
 });
 function syncBoardUrl() {
   const url = new URL(location.href);
@@ -791,7 +818,7 @@ function syncBoardUrl() {
   if (query) url.searchParams.set("q", query); else url.searchParams.delete("q");
   history.replaceState(null, "", url);
 }
-function openLeagueResults() { renderLeagueResults(); elements.leagueDialog.showModal(); }
+function openLeagueResults() { renderLeagueResults(); elements.leagueDialog.showModal(); void logCurrentDraft(isComplete() ? "complete" : "in-progress"); }
 
 function toggleComparison(playerId) {
   if (comparisonSelection.has(playerId)) comparisonSelection.delete(playerId);
@@ -839,8 +866,113 @@ function draftReport() {
     tradedPicks: state.tradedPicks,
     opponents: state.opponentBeliefs,
     teams: rosters.map((roster, team) => ({ team, grade: rosterGrade(roster), evaluation: evaluateRoster(roster, state.settings, rosters), players: roster.map((player) => ({ id: player.id, name: player.name, position: player.position, team: player.team, projection: player.projection })) })),
+    externalGrade: state.externalGrade,
     feedback: state.feedback
   };
+}
+
+function currentDraftLogEntry(status = isComplete() ? "complete" : "in-progress") {
+  const report = draftReport();
+  const userTeam = report.teams.find((team) => team.team === state.settings.userSlot);
+  return {
+    id: state.draftId,
+    startedAt: state.startedAt,
+    completedAt: status === "complete" ? new Date().toISOString() : null,
+    status,
+    scoring: "PPR",
+    settingsFingerprint: settingsFingerprint({ ...state.settings, gradeVersion: GRADE_MODEL_VERSION }),
+    gradeModelVersion: GRADE_MODEL_VERSION,
+    settings: { teams: state.settings.teams, rounds: state.settings.rounds, userSlot: state.settings.userSlot, draftFormat: state.settings.draftFormat, rosterSlots: state.settings.rosterSlots, tePremium: state.settings.tePremium },
+    pickCount: state.picks.length + state.keepers.length,
+    picks: state.picks.map((pick) => ({ playerId: pick.playerId, team: pick.team, index: pick.index, price: pick.price || null })),
+    keepers: state.keepers,
+    userScore: userTeam?.evaluation?.score ?? null,
+    userGrade: userTeam?.grade ?? "—",
+    teamResults: report.teams.map((team) => ({ team: team.team, grade: team.grade, score: team.evaluation.score, weekly: team.evaluation.weekly, expectedWins: team.evaluation.expectedWins })),
+    externalGrade: state.externalGrade,
+    feedbackCount: state.feedback.length
+  };
+}
+
+async function logCurrentDraft(status) {
+  if (!state.picks.length && !state.keepers.length) return null;
+  const entry = await putDraftLog(currentDraftLogEntry(status));
+  draftHistory = [entry, ...draftHistory.filter((item) => item.id !== entry.id)];
+  return entry;
+}
+
+function externalGradingDraft() {
+  const rosters = allRosters();
+  return {
+    schemaVersion: 1,
+    scoring: "PPR",
+    settings: state.settings,
+    leagueImport: state.leagueImport ? { leagueId: state.leagueImport.leagueId, name: state.leagueImport.name } : null,
+    picks: state.picks,
+    keepers: state.keepers,
+    tradedPicks: state.tradedPicks,
+    teams: rosters.map((roster, team) => ({ team, players: roster.map((player) => ({ id: player.id, name: player.name, position: player.position, nflTeam: player.team })) }))
+  };
+}
+
+async function runExternalGrade() {
+  const endpoint = (elements.graderEndpoint.value || localStorage.getItem(GRADER_ENDPOINT_KEY) || "").trim();
+  if (!endpoint) { showToast("Add an external grader endpoint in Draft Setup"); return; }
+  let parsed;
+  try { parsed = new URL(endpoint); }
+  catch { showToast("External grader URL is invalid"); return; }
+  if (parsed.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(parsed.hostname)) { showToast("External grader must use HTTPS"); return; }
+  elements.externalGradeButton.disabled = true;
+  elements.externalGradeButton.textContent = "Grading…";
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const token = elements.graderToken.value || sessionStorage.getItem(GRADER_TOKEN_KEY) || "";
+    const headers = { "Content-Type": "application/json", "Accept": "application/json" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({ schemaVersion: 1, requestId: state.draftId, gradingRequirements: { scoring: "PPR", scoreRange: [0, 100], independentEvidenceRequired: true }, draft: externalGradingDraft() })
+    });
+    if (!response.ok) throw new Error(`External grader returned HTTP ${response.status}.`);
+    const declaredBytes = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredBytes) && declaredBytes > 1_000_000) throw new Error("External grader response exceeded 1 MB.");
+    const responseText = await response.text();
+    if (responseText.length > 1_000_000) throw new Error("External grader response exceeded 1 MB.");
+    state.externalGrade = { ...validateExternalGradeResponse(JSON.parse(responseText), state.settings.teams), requestPickCount: state.picks.length + state.keepers.length, draftId: state.draftId };
+    saveState();
+    await logCurrentDraft(isComplete() ? "complete" : "in-progress");
+    renderLeagueResults();
+    showToast(`Independent grade received from ${state.externalGrade.provider}`);
+  } catch (error) {
+    const message = error.name === "AbortError" ? "External grader timed out after 15 seconds." : error.message;
+    elements.graderAudit.innerHTML = `<strong>Independent grade failed</strong><span>${escapeHtml(message)} The local grade was not changed.</span>`;
+    showToast("Independent grade unavailable; local score unchanged");
+  } finally {
+    clearTimeout(timeout);
+    elements.externalGradeButton.disabled = false;
+    elements.externalGradeButton.textContent = "Get independent grade";
+  }
+}
+
+async function openDraftLog() {
+  await logCurrentDraft(isComplete() ? "complete" : "in-progress");
+  draftHistory = await getDraftLogs();
+  const rows = draftHistory.map((entry) => `<tr><td>${new Date(entry.startedAt).toLocaleString()}</td><td>${escapeHtml(entry.status)}</td><td>${entry.settings?.teams || "—"} teams · ${escapeHtml(entry.settings?.draftFormat || "snake")}</td><td>${entry.pickCount}</td><td>${escapeHtml(entry.userGrade || "—")}${entry.externalGrade ? ` / ${escapeHtml(entry.externalGrade.teams?.find((team) => team.team === entry.settings?.userSlot)?.grade || "—")}` : ""}</td></tr>`).join("");
+  elements.compareContent.innerHTML = `<div class="comparison-card audit-log"><p class="eyebrow">Persistent browser ledger</p><h3>Draft log</h3><p>Every started room is retained on this device. Local and independent grades stay separate so historical comparisons remain auditable.</p><div class="table-wrap"><table><thead><tr><th>Started</th><th>Status</th><th>Format</th><th>Picks</th><th>Local / external</th></tr></thead><tbody>${rows || "<tr><td colspan=\"5\">No drafts logged yet.</td></tr>"}</tbody></table></div><button class="button button-dark" type="button" data-export-ledger>Export complete log</button></div>`;
+  elements.compareDialog.showModal();
+}
+
+async function exportDraftLedger() {
+  const entries = await getDraftLogs();
+  const blob = new Blob([JSON.stringify({ schemaVersion: 1, exportedAt: new Date().toISOString(), drafts: entries }, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `war-room-draft-ledger-${new Date().toISOString().slice(0, 10)}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 0);
 }
 
 function exportDraftReport() {
@@ -880,9 +1012,20 @@ elements.compareButton.addEventListener("click", () => openComparison());
 elements.importSleeperButton.addEventListener("click", importSleeperLeague);
 elements.exportDraftButton.addEventListener("click", exportDraftReport);
 elements.shareDraftButton.addEventListener("click", () => copyShareLink().catch(() => showToast("Copy failed; use the address bar link")));
+elements.draftLogButton.addEventListener("click", () => void openDraftLog());
+elements.externalGradeButton.addEventListener("click", () => void runExternalGrade());
 elements.runBacktestButton.addEventListener("click", runDraftBacktest);
 elements.teamCount.addEventListener("change", () => populateSlots(Number(elements.userSlot.value)));
 elements.newDraftButton.addEventListener("click", startNewDraft);
+elements.graderEndpoint.addEventListener("input", () => {
+  const endpoint = elements.graderEndpoint.value.trim();
+  if (endpoint) localStorage.setItem(GRADER_ENDPOINT_KEY, endpoint); else localStorage.removeItem(GRADER_ENDPOINT_KEY);
+  elements.graderConfigStatus.textContent = endpoint ? "Endpoint saved on this device. Bearer tokens remain in this browser tab only." : "No external grader configured. API credentials are never saved in the draft report.";
+});
+elements.graderToken.addEventListener("input", () => {
+  const token = elements.graderToken.value;
+  if (token) sessionStorage.setItem(GRADER_TOKEN_KEY, token); else sessionStorage.removeItem(GRADER_TOKEN_KEY);
+});
 elements.projectionFile.addEventListener("change", async (event) => {
   const file = event.target.files?.[0];
   if (!file) return;
@@ -923,6 +1066,8 @@ try {
   }
   recalculateModel();
   saveState();
+  draftHistory = await getDraftLogs();
+  if (state.picks.length || state.keepers.length) await logCurrentDraft(isComplete() ? "complete" : "in-progress");
   renderAll();
 } catch (error) {
   elements.playerRows.innerHTML = `<tr><td class="empty-row" colspan="7">Player data could not load. Run this app through the included local server.</td></tr>`;

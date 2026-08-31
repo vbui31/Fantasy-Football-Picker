@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { availabilityAtNextPick, enrichPlayerModel, evidenceProfile, missingStarterSlots, nextPickIndexForTeam, opponentStrategyForTeam, opponentStrategyImpact, replacementRanks, scoreCandidate } from "../draft-model.js";
 import { buildProjectionDataset, parseCsv } from "../ffanalytics-data.js";
 import { createOpponentBeliefs, dominantOpponentStyle, evaluateRoster, normalizeLeagueSettings, runMonteCarloRestOfDraft, updateOpponentBelief } from "../draft-intelligence.js";
+import { historicalCalibration, settingsFingerprint, validateExternalGradeResponse } from "../draft-audit.js";
 
 const ranks = replacementRanks(10, 15);
 assert.deepEqual(ranks, { QB: 12, RB: 32, WR: 35, TE: 13, K: 10, DST: 10 });
@@ -96,6 +97,15 @@ const mc = runMonteCarloRestOfDraft({ candidateIds: ["mc-0", "mc-1"], watchPlaye
 assert.equal(mc["mc-0"].simulations, 8);
 assert.ok(Number.isFinite(mc["mc-0"].expectedWeekly), "Monte Carlo must return a finite completed-roster expectation");
 assert.ok(mc["mc-0"].survival["mc-1"] >= 0 && mc["mc-0"].survival["mc-1"] <= 1, "next-turn survival must be calibrated as a probability");
+
+const auditSettings = normalizeLeagueSettings({ teams: 4, rounds: 5, rosterSlots: { QB: 1, RB: 1, WR: 1, TE: 0, FLEX: 1, SUPERFLEX: 0, K: 0, DST: 0 } });
+const external = validateExternalGradeResponse({ provider: "Independent projections", modelVersion: "1", gradedAt: "2026-08-31T00:00:00Z", methodology: "Separate PPR model", teams: Array.from({ length: 4 }, (_, team) => ({ team, score: 80 - team * 5, grade: ["A", "B+", "B", "C+"][team], confidence: .8, explanation: ["Deterministic projection score"] })) }, 4);
+assert.equal(external.teams.length, 4, "external graders must return one valid grade per team");
+assert.throws(() => validateExternalGradeResponse({ provider: "test", modelVersion: "1", methodology: "test", teams: [{ team: 0, score: 140 }] }, 1), /0 to 100/, "out-of-range external scores must be rejected");
+assert.throws(() => validateExternalGradeResponse({ teams: [{ team: 0, score: 80 }] }, 1), /provider, model version, and methodology/, "anonymous external grades must be rejected");
+const auditFingerprint = settingsFingerprint(auditSettings);
+const calibration = historicalCalibration(120, [{ id: "old-1", status: "complete", settingsFingerprint: auditFingerprint, userScore: 100 }, { id: "old-2", status: "complete", settingsFingerprint: auditFingerprint, userScore: 110 }], auditSettings, "current");
+assert.equal(calibration.percentile, 1, "past grades should calibrate current results only against matching completed rooms");
 
 const sampleRows = parseCsv(await readFile(new URL("../examples/ffanalytics-sample.csv", import.meta.url), "utf8"));
 const samplePlayers = [

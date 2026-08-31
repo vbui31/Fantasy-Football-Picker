@@ -119,6 +119,10 @@ The calculation lives in `draft-model.js` and produces browser-safe numbers only
 
 Roster grades now compare projected weekly starters, bench VBD, floor/ceiling range, known bye conflicts, injury concentration, QB/pass-catcher correlation, team concentration, positional advantage, and pairwise expected wins. Every league-results card explains the largest components.
 
+Completed and abandoned rooms are also written to a browser-local draft ledger. The ledger preserves league settings, selections, local grades, independent grades, and feedback counts, can be reviewed in **League Results → Draft log**, and can be exported as JSON. Matching completed rooms calibrate the current raw roster score against past grades without treating those historical model outputs as ground truth.
+
+An optional independent grader can be configured in **Draft Setup**. Because GitHub Pages is static, provider credentials must stay behind an HTTPS server-side proxy; never commit FantasyPros, SportsDataIO, or other API keys to this repository. War Room validates the external response, preserves provider/version/methodology provenance, displays local and external grades separately, and flags large disagreement instead of allowing an outside score to silently overwrite recommendations. See [the external grader API contract](docs/external-grader-api.md).
+
 The in-app historical evaluation joins completed rosters to bundled prior-season outcomes and reports coverage, recommendation regret, projection MAE, legal-lineup rate, playoff probability, and championship probability by draft slot. It is explicitly labeled exploratory until matching archived draft-time projection and ADP snapshots are provided; future information must never be promoted into production weights.
 
 The repository includes `.codex/skills/fantasy-draft-learning`, a validated skill that defines chronological evaluation, minimum sample sizes, segmentation, and model-promotion gates. It allows room-specific opponent beliefs to adapt immediately while preventing small mock samples from silently rewriting global strategy weights.
