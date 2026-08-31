@@ -1,4 +1,4 @@
-import { enrichPlayerModel, nextPickIndexForTeam, scoreCandidate } from "./draft-model.js";
+import { enrichPlayerModel, nextPickIndexForTeam, opponentStrategyForTeam, opponentStrategyImpact, scoreCandidate } from "./draft-model.js";
 import { buildProjectionDataset, parseCsv } from "./ffanalytics-data.js";
 
 const POSITIONS = ["ALL", "RB", "WR", "QB", "TE", "FLEX", "K", "DST"];
@@ -20,6 +20,7 @@ const elements = Object.fromEntries([
 ].map((id) => [id, document.getElementById(id)]));
 
 let dataset;
+let liveContext = null;
 let activePosition = "ALL";
 let toastTimer;
 let simulationNonce = 0;
@@ -57,7 +58,32 @@ function isComplete() { return state.picks.length >= state.settings.teams * stat
 
 function availablePlayers() {
   const drafted = new Set(state.picks.map((pick) => pick.playerId));
-  return dataset.players.filter((player) => !drafted.has(player.id));
+  return dataset.players.filter((player) => !drafted.has(player.id) && (!dataset.liveData?.fresh || !["inactive", "retired"].includes(String(player.liveStatus || "").toLowerCase())));
+}
+
+function applyLiveContext(context) {
+  const ageHours = (Date.now() - Date.parse(context?.generatedAt)) / 3_600_000;
+  const fresh = Number.isFinite(ageHours) && ageHours <= 48 && context?.quality?.status === "usable";
+  let matches = 0;
+  if (fresh) {
+    for (const player of dataset.players) {
+      const live = context.players?.[player.id];
+      if (!live) continue;
+      matches++;
+      player.team = live.team || player.team;
+      player.liveStatus = live.status;
+      player.injury = live.injuryStatus || null;
+      player.injuryBodyPart = live.injuryBodyPart;
+      player.practiceParticipation = live.practiceParticipation;
+      player.practiceDescription = live.practiceDescription;
+      player.newsUpdated = live.newsUpdated;
+      player.trendingAdds = live.trendingAdds || 0;
+      player.trendingDrops = live.trendingDrops || 0;
+      player.lastSeason = live.lastSeason;
+      if (Number.isFinite(live.depthChartOrder)) player.depthOrder = live.depthChartOrder;
+    }
+  }
+  dataset.liveData = { fresh, matches, generatedAt: context?.generatedAt || null, ageHours };
 }
 
 function recalculateModel() {
@@ -89,15 +115,19 @@ function recalculateModel() {
   dataset.players.sort((a, b) => b.vbd - a.vbd || b.projection - a.projection || a.sourceRank - b.sourceRank);
   dataset.players.forEach((player, index) => { player.rank = index + 1; });
   const consensus = state.model?.source === "ffanalytics";
-  elements.modelState.textContent = consensus ? `Consensus · ${state.model.matches} matched` : "Registry model";
+  const liveLabel = dataset.liveData?.fresh ? ` · Live ${dataset.liveData.matches}` : "";
+  elements.modelState.textContent = consensus ? `Consensus · ${state.model.matches} matched${liveLabel}` : `Registry model${liveLabel}`;
   elements.modelState.classList.toggle("consensus", consensus);
   elements.importStatus.textContent = consensus
     ? `${state.model.matches} players matched from ${state.model.fileName}${state.model.scoringFormat ? ` · ${state.model.scoringFormat.toUpperCase()}` : ""}${state.model.generatedAt ? ` · generated ${new Intl.DateTimeFormat().format(new Date(state.model.generatedAt))}` : ""}. ${state.model.unmatched} rows were unmatched or unusable.`
     : "No consensus file loaded.";
   elements.clearModelButton.hidden = !consensus;
-  elements.methodology.textContent = consensus
+  const liveMethod = dataset.liveData?.fresh
+    ? ` Daily Sleeper availability, practice, depth-chart, and trend context refreshed ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(dataset.liveData.generatedAt))}; nflverse prior-season stats provide historical context. News timestamps are metadata only, not headline sentiment.`
+    : liveContext ? " The bundled live context is older than 48 hours, so availability overrides are disabled." : " Live context is unavailable; registry metadata remains in use.";
+  elements.methodology.textContent = (consensus
     ? `ffanalytics weighted consensus from ${state.model.fileName} supplies projections, ranges, expert ranks, ADP, auction values, and uncertainty. Research-derived reliability, phase-aware floor/ceiling utility, dynamic replacement levels (${Object.entries(replacement).map(([position, rank]) => `${position}${rank}`).join(", ")}), roster feasibility, probabilistic tiers, and next-turn availability are recalculated for this room.`
-    : `${dataset.methodology} Research-derived reliability, rookie cold-start handling, roster feasibility, dynamic replacement levels, probabilistic tiers, and next-turn availability are recalculated for this ${state.settings.teams}-team room.`;
+    : `${dataset.methodology} Research-derived reliability, rookie cold-start handling, roster feasibility, dynamic replacement levels, probabilistic tiers, and next-turn availability are recalculated for this ${state.settings.teams}-team room.`) + liveMethod;
 }
 
 function draftedPlayersForTeam(team) {
@@ -109,13 +139,19 @@ function countPositions(roster) {
   return roster.reduce((counts, player) => ({ ...counts, [player.position]: (counts[player.position] || 0) + 1 }), {});
 }
 
+function recentDraftedPlayers(limit = 5) {
+  const byId = new Map(dataset.players.map((player) => [player.id, player]));
+  return state.picks.slice(-limit).map((pick) => byId.get(pick.playerId)).filter(Boolean);
+}
+
 function recommendations(team = pickContext().team) {
   const roster = draftedPlayersForTeam(team);
   const context = pickContext();
   const available = availablePlayers();
+  const recentPicks = recentDraftedPlayers();
   const nextPickIndex = nextPickIndexForTeam(state.picks.length, team, state.settings.teams, state.settings.teams * state.settings.rounds);
   return available
-    .map((player) => ({ player, ...scoreCandidate(player, { roster, round: context.round, currentPickIndex: state.picks.length, nextPickIndex, availablePlayers: available, profile: OPPONENT_PROFILE, totalRounds: state.settings.rounds }) }))
+    .map((player) => ({ player, ...scoreCandidate(player, { roster, round: context.round, currentPickIndex: state.picks.length, nextPickIndex, availablePlayers: available, profile: OPPONENT_PROFILE, totalRounds: state.settings.rounds, recentPicks }) }))
     .sort((a, b) => b.score - a.score || b.player.vbd - a.player.vbd || a.player.rank - b.player.rank);
 }
 
@@ -165,9 +201,11 @@ function renderBoard() {
   const nextPickIndex = nextPickIndexForTeam(state.picks.length, team, state.settings.teams, state.settings.teams * state.settings.rounds);
   const roster = draftedPlayersForTeam(team);
   const available = availablePlayers();
+  const recentPicks = recentDraftedPlayers();
   elements.playerRows.innerHTML = players.slice(0, 50).map((player) => {
-    const decision = scoreCandidate(player, { roster, round: context.round, currentPickIndex: state.picks.length, nextPickIndex, availablePlayers: available, profile: OPPONENT_PROFILE, totalRounds: state.settings.rounds });
-    const signal = player.injury || `T${player.tier} · ${decision.hasNextPick ? `${Math.round(decision.availability * 100)}% next` : "final turn"}`;
+    const decision = scoreCandidate(player, { roster, round: context.round, currentPickIndex: state.picks.length, nextPickIndex, availablePlayers: available, profile: OPPONENT_PROFILE, totalRounds: state.settings.rounds, recentPicks });
+    const trend = player.trendingAdds > player.trendingDrops && player.trendingAdds >= 5 ? `↑ ${player.trendingAdds} adds` : null;
+    const signal = player.injury || trend || `T${player.tier} · ${decision.hasNextPick ? `${Math.round(decision.availability * 100)}% next` : "final turn"}`;
     const lowRisk = Number.isFinite(player.uncertainty) && player.uncertainty <= (player.uncertainty <= 1 ? .33 : 33);
     return `<tr>
       <td class="rank-cell">${player.rank}</td>
@@ -268,7 +306,7 @@ function renderLeagueResults() {
     const counts = countPositions(players);
     const projection = players.reduce((sum, player) => sum + player.projection, 0);
     return `<article class="team-card ${team === state.settings.userSlot ? "is-user" : ""}">
-      <header><div><span>${index === 0 && players.length ? "ROOM LEADER" : `DRAFT SLOT ${team + 1}`}</span><h3>${escapeHtml(teamName(team))}</h3></div><strong>${grade}</strong></header>
+      <header><div><span>${index === 0 && players.length ? "ROOM LEADER" : `DRAFT SLOT ${team + 1}`} · ${team === state.settings.userSlot ? "RECOMMENDATION MODEL" : escapeHtml(opponentStrategyForTeam(team).name.toUpperCase())}</span><h3>${escapeHtml(teamName(team))}</h3></div><strong>${grade}</strong></header>
       <div class="team-card-stats"><span>${players.length} picks</span><span>${projection.toLocaleString(undefined, { maximumFractionDigits: 1 })} pts</span><span>QB ${counts.QB || 0} · RB ${counts.RB || 0} · WR ${counts.WR || 0} · TE ${counts.TE || 0}</span></div>
       <ol>${players.map((player) => `<li><span class="pos-badge pos-${player.position}">${player.position}</span><strong>${escapeHtml(player.name)}</strong><small>${player.team}</small></li>`).join("") || "<li class=\"team-empty\">No picks yet.</li>"}</ol>
     </article>`;
@@ -300,10 +338,17 @@ function draftPlayer(playerId, isAuto = false) {
 
 function autoPick() {
   const context = pickContext();
-  const choices = recommendations(context.team).slice(0, 7);
+  const roster = draftedPlayersForTeam(context.team);
+  const recentPicks = recentDraftedPlayers();
+  const choices = recommendations(context.team).slice(0, 20);
   if (!choices.length) return;
-  const seed = (state.picks.length * 17 + context.team * 11) % choices.length;
-  draftPlayer(choices[seed].player.id, true);
+  const ranked = choices.map((choice) => {
+    const strategy = opponentStrategyImpact(choice.player, { roster, round: context.round, team: context.team, recentPicks });
+    const hash = [...String(choice.player.id)].reduce((value, character) => (value * 31 + character.charCodeAt(0)) % 997, state.picks.length + context.team * 17);
+    const stableVariation = (hash / 997 - .5) * 3;
+    return { ...choice, opponentScore: choice.score + strategy.impact + stableVariation };
+  }).sort((a, b) => b.opponentScore - a.opponentScore || b.score - a.score);
+  draftPlayer(ranked[0].player.id, true);
 }
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -466,6 +511,13 @@ try {
   if (!response.ok) throw new Error(`Player data returned ${response.status}`);
   dataset = await response.json();
   dataset.players.forEach((player) => { player.baseProjection = player.projection; player.baseVbd = player.vbd; });
+  try {
+    const liveResponse = await fetch("data/live-player-context.json");
+    if (liveResponse.ok) {
+      liveContext = await liveResponse.json();
+      applyLiveContext(liveContext);
+    }
+  } catch { /* The daily live snapshot is optional. */ }
   state.picks = state.picks.filter((pick) => dataset.players.some((player) => player.id === pick.playerId));
   const initialParams = new URL(location.href).searchParams;
   activePosition = POSITIONS.includes((initialParams.get("pos") || "").toUpperCase()) ? initialParams.get("pos").toUpperCase() : "ALL";

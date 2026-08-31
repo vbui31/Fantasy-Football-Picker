@@ -146,6 +146,105 @@ export function evidenceProfile(player, round = 0, totalRounds = 15) {
   return { uncertainty, reliability, floor, ceiling, phase, utilityProjection, impact, rookie };
 }
 
+function liveAvailabilityImpact(player) {
+  const status = String(player.liveStatus || "").toLowerCase();
+  const injury = String(player.injury || "").toLowerCase();
+  const practice = String(player.practiceParticipation || "").toLowerCase();
+  if (["inactive", "retired"].includes(status)) return { impact: -1000, detail: `${player.liveStatus} players are removed from draft consideration.` };
+  if (/injured reserve|physically unable|suspended/.test(status)) return { impact: -90, detail: `${player.liveStatus} status creates a major availability risk.` };
+  if (/out/.test(injury)) return { impact: -55, detail: `${player.injury} injury status creates a major availability risk.` };
+  if (/doubtful/.test(injury)) return { impact: -30, detail: `${player.injury} injury status materially reduces availability.` };
+  if (/questionable|dnr|did not practice/.test(`${injury} ${practice}`)) return { impact: -12, detail: `${player.injury || player.practiceParticipation} status reduces near-term confidence.` };
+  if (/limited/.test(practice)) return { impact: -5, detail: "Limited practice participation adds near-term uncertainty." };
+  return { impact: 0, detail: "No current availability downgrade is present." };
+}
+
+function historicalContextImpact(player) {
+  const history = player.lastSeason;
+  if (!history || !Number.isFinite(history.pointsPerGame) || !Number.isFinite(history.games) || history.games < 3) return { impact: 0, detail: "No sufficiently complete prior-season sample is available." };
+  const pace = history.pointsPerGame * 17;
+  const sampleWeight = Math.min(1, history.games / 14);
+  const impact = Math.max(-6, Math.min(6, (pace - player.projection) / 25)) * sampleWeight;
+  return { impact, detail: `${history.games} games at ${history.pointsPerGame.toFixed(1)} PPR points per game provide a bounded historical cross-check, not a forecast.` };
+}
+
+function marketTrendImpact(player) {
+  const adds = Number(player.trendingAdds) || 0;
+  const drops = Number(player.trendingDrops) || 0;
+  if (!adds && !drops) return { impact: 0, detail: "No material 24-hour transaction trend is present." };
+  const net = adds - drops;
+  const impact = Math.max(-4, Math.min(4, Math.sign(net) * Math.log10(Math.abs(net) + 1)));
+  return { impact, detail: `${adds} adds and ${drops} drops over 24 hours are treated as a weak market signal.` };
+}
+
+function strategicWindow(player, counts, round, totalRounds) {
+  const finalRound = totalRounds - 1;
+  if (player.position === "K") return round < finalRound ? { impact: -120, detail: "Kicker is reserved for the final round because the position has a shallow value curve." } : { impact: 12, detail: "The final round is the intended kicker window." };
+  if (player.position === "DST") return round < totalRounds - 3 ? { impact: -90, detail: "Defense is delayed while higher-upside skill players remain." } : { impact: 8, detail: "The late-round defense window is open." };
+  if (player.position === "QB") {
+    if ((counts.QB || 0) >= 1 && round < totalRounds - 3) return { impact: -46, detail: "A second quarterback would displace more useful RB/WR depth." };
+    if (!(counts.QB) && round < 5) return { impact: player.tier === 1 && (player.tierDropoff || 0) >= 12 ? -4 : -18, detail: "One-QB strategy preserves early draft capital for scarcer positions." };
+  }
+  if (player.position === "TE") {
+    if ((counts.TE || 0) >= 1 && round < totalRounds - 3) return { impact: -34, detail: "A second tight end is delayed unless the first option was a late-round bet." };
+    if (!(counts.TE) && round < 4 && player.tier > 1) return { impact: -14, detail: "Tight end is elite-or-wait; this tier does not justify an early pick." };
+    if (!(counts.TE) && round < 4 && player.tier === 1 && (player.tierDropoff || 0) >= 8) return { impact: 10, detail: "An elite tight-end cliff can justify paying for positional advantage." };
+  }
+  return { impact: 0, detail: "The position is inside a reasonable draft window." };
+}
+
+function benchUpside(player, counts, round, totalRounds, evidence) {
+  if (round < Math.max(6, Math.floor(totalRounds * .45)) || !["RB", "WR", "TE"].includes(player.position)) return { impact: 0, detail: "Starter-building rounds emphasize value and roster shape." };
+  const rangeUpside = Math.max(0, evidence.ceiling - player.projection) / Math.max(1, player.projection);
+  const youth = player.yearsExperience === 0 ? 5 : Number.isFinite(player.age) && player.age <= 24 ? 2 : 0;
+  const contingentRole = player.position === "RB" && player.depthOrder === 2 ? 7 : player.depthOrder === 2 ? 3 : 0;
+  const surplusSkillDepth = (counts.RB || 0) + (counts.WR || 0) + (counts.TE || 0) >= 6 ? 2 : 0;
+  const impact = Math.min(15, rangeUpside * 24 + youth + contingentRole + surplusSkillDepth);
+  return { impact, detail: impact >= 7 ? "Late-round ceiling, youth, or a contingent workload creates league-changing bench upside." : "Adds modest bench upside without relying on a low-ceiling veteran floor." };
+}
+
+function portfolioBalance(player, roster, round, totalRounds, evidence) {
+  if (!roster.length || round < 4) return { impact: 0, detail: "Portfolio balance becomes meaningful after the foundation rounds." };
+  const averageReliability = roster.reduce((sum, rosterPlayer) => sum + evidenceProfile(rosterPlayer, round, totalRounds).reliability, 0) / roster.length;
+  let impact = 0;
+  if (averageReliability < .56) impact = (evidence.reliability - .56) * 14;
+  else if (averageReliability > .68) impact = (.68 - evidence.reliability) * 8;
+  return { impact, detail: averageReliability < .56 ? "This volatile roster benefits from a steadier outcome range." : averageReliability > .68 ? "A stable roster can afford another ceiling bet." : "The roster already has a balanced mix of stability and volatility." };
+}
+
+function runPressure(position, recentPicks = [], round = 0) {
+  const samePosition = recentPicks.filter((pick) => pick?.position === position).length;
+  if (samePosition < 2) return 0;
+  if (["K", "DST"].includes(position)) return 0;
+  if (position === "QB" && round < 5) return Math.min(4, samePosition);
+  return Math.min(8, samePosition * 2);
+}
+
+export const OPPONENT_STRATEGIES = [
+  { id: "adaptive", name: "Adaptive Value" },
+  { id: "hero-rb", name: "Hero RB" },
+  { id: "wr-core", name: "WR Core" },
+  { id: "robust-rb", name: "Robust RB" },
+  { id: "elite-te", name: "Elite TE" },
+  { id: "late-qb", name: "Late QB" }
+];
+
+export function opponentStrategyForTeam(team) {
+  return OPPONENT_STRATEGIES[team % OPPONENT_STRATEGIES.length];
+}
+
+export function opponentStrategyImpact(player, { roster, round, team, recentPicks = [] }) {
+  const strategy = opponentStrategyForTeam(team);
+  const counts = roster.reduce((result, rosterPlayer) => ({ ...result, [rosterPlayer.position]: (result[rosterPlayer.position] || 0) + 1 }), {});
+  let impact = runPressure(player.position, recentPicks, round) * (player.position === "QB" || player.position === "K" || player.position === "DST" ? 1.25 : .45);
+  if (strategy.id === "hero-rb") impact += player.position === "RB" && !(counts.RB) && round < 3 ? 13 : player.position === "WR" && (counts.RB || 0) >= 1 && round < 7 ? 5 : 0;
+  if (strategy.id === "wr-core") impact += player.position === "WR" && round < 6 ? 9 : player.position === "RB" && round >= 4 && round < 9 ? 5 : 0;
+  if (strategy.id === "robust-rb") impact += player.position === "RB" && (counts.RB || 0) < 2 && round < 4 ? 11 : 0;
+  if (strategy.id === "elite-te") impact += player.position === "TE" && !(counts.TE) && player.tier === 1 && round < 4 ? 14 : 0;
+  if (strategy.id === "late-qb") impact += player.position === "QB" && round < 8 ? -15 : player.position === "RB" || player.position === "WR" ? 3 : 0;
+  return { strategy, impact };
+}
+
 const REQUIRED_STARTERS = { QB: 1, RB: 2, WR: 2, TE: 1, K: 1, DST: 1 };
 
 export function missingStarterSlots(counts) {
@@ -196,7 +295,7 @@ function rosterFit(player, counts, round, profile) {
   return { impact, detail };
 }
 
-export function scoreCandidate(player, { roster, round, currentPickIndex, nextPickIndex, availablePlayers, profile, totalRounds = 15 }) {
+export function scoreCandidate(player, { roster, round, currentPickIndex, nextPickIndex, availablePlayers, profile, totalRounds = 15, recentPicks = [] }) {
   const counts = roster.reduce((result, rosterPlayer) => {
     result[rosterPlayer.position] = (result[rosterPlayer.position] || 0) + 1;
     return result;
@@ -204,16 +303,22 @@ export function scoreCandidate(player, { roster, round, currentPickIndex, nextPi
   const fit = rosterFit(player, counts, round, profile);
   const constraint = constraintFit(player, counts, roster.length, totalRounds);
   const evidence = evidenceProfile(player, round, totalRounds);
+  const window = strategicWindow(player, counts, round, totalRounds);
+  const upside = benchUpside(player, counts, round, totalRounds, evidence);
+  const portfolio = portfolioBalance(player, roster, round, totalRounds, evidence);
+  const live = liveAvailabilityImpact(player);
+  const history = historicalContextImpact(player);
+  const trend = marketTrendImpact(player);
   const availability = availabilityAtNextPick(player, currentPickIndex, nextPickIndex);
   const tierRemaining = availablePlayers.filter((candidate) => candidate.position === player.position && candidate.tier === player.tier).length;
   const tierImpact = Math.min(16, (player.tierDropoff || 0) * .8) + (tierRemaining <= 2 ? 5 : 0);
   const hasNextPick = nextPickIndex !== null && nextPickIndex > currentPickIndex;
   const urgencyImpact = hasNextPick ? (1 - availability) * Math.min(30, 10 + Math.max(0, player.vbd) * .12) : 0;
-  const riskImpact = (player.injury ? -8 : 0);
+  const runImpact = runPressure(player.position, recentPicks, round);
   const marketPick = Number.isFinite(player.adp) ? player.adp : Number.isFinite(player.expertRank) ? player.expertRank : player.sourceRank;
   const reach = Number.isFinite(marketPick) ? marketPick - (currentPickIndex + 1) : 0;
   const marketImpact = reach > 14 ? -Math.min(14, (reach - 14) * .16) : reach < 2 ? 3 : 0;
-  const score = player.vbd + fit.impact + constraint.impact + evidence.impact + tierImpact + urgencyImpact + riskImpact + marketImpact;
+  const score = player.vbd + fit.impact + constraint.impact + evidence.impact + window.impact + upside.impact + portfolio.impact + live.impact + history.impact + trend.impact + tierImpact + urgencyImpact + runImpact + marketImpact;
   const factors = [
     { label: "Value", impact: player.vbd, detail: `${player.vbd >= 0 ? "+" : ""}${player.vbd.toFixed(1)} points versus ${player.position}${player.replacementRank}.` },
     { label: "Roster fit", impact: fit.impact, detail: fit.detail },
@@ -222,7 +327,13 @@ export function scoreCandidate(player, { roster, round, currentPickIndex, nextPi
     { label: "Wait risk", impact: urgencyImpact, detail: hasNextPick ? `${Math.round(availability * 100)}% estimated chance to reach the next pick.` : "Final selection; there is no later turn to preserve value for." }
   ];
   if (constraint.impact) factors.push({ label: "Lineup constraint", impact: constraint.impact, detail: constraint.detail });
-  if (riskImpact) factors.push({ label: "Availability", impact: riskImpact, detail: `${player.injury} designation reduces the score.` });
+  if (window.impact) factors.push({ label: "Draft window", impact: window.impact, detail: window.detail });
+  if (upside.impact) factors.push({ label: "Bench upside", impact: upside.impact, detail: upside.detail });
+  if (portfolio.impact) factors.push({ label: "Risk balance", impact: portfolio.impact, detail: portfolio.detail });
+  if (live.impact) factors.push({ label: "Live availability", impact: live.impact, detail: live.detail });
+  if (history.impact) factors.push({ label: "Historical check", impact: history.impact, detail: history.detail });
+  if (trend.impact) factors.push({ label: "Market trend", impact: trend.impact, detail: trend.detail });
+  if (runImpact) factors.push({ label: "Position run", impact: runImpact, detail: "Recent picks increase the chance this tier is depleted before the next turn without forcing a panic pick." });
   if (marketImpact < 0) factors.push({ label: "Reach", impact: marketImpact, detail: "Market position suggests a later selection may be possible." });
   return { score, availability, hasNextPick, tierRemaining, reliability: evidence.reliability, phase: evidence.phase, utilityProjection: evidence.utilityProjection, factors: factors.sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact)) };
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { availabilityAtNextPick, enrichPlayerModel, evidenceProfile, missingStarterSlots, nextPickIndexForTeam, replacementRanks, scoreCandidate } from "../draft-model.js";
+import { availabilityAtNextPick, enrichPlayerModel, evidenceProfile, missingStarterSlots, nextPickIndexForTeam, opponentStrategyForTeam, opponentStrategyImpact, replacementRanks, scoreCandidate } from "../draft-model.js";
 import { buildProjectionDataset, parseCsv } from "../ffanalytics-data.js";
 
 const ranks = replacementRanks(10, 15);
@@ -46,6 +46,21 @@ const finalBase = { projection: 100, vbd: 0, tier: 1, tierDropoff: 0, tierProbab
 const dstDecision = scoreCandidate({ ...finalBase, id: "dst", position: "DST" }, { roster: nearlyCompleteRoster, round: 14, currentPickIndex: 149, nextPickIndex: null, availablePlayers: [{ ...finalBase, id: "dst", position: "DST" }], profile, totalRounds: 15 });
 const rbDecision = scoreCandidate({ ...finalBase, id: "extra-rb", position: "RB" }, { roster: nearlyCompleteRoster, round: 14, currentPickIndex: 149, nextPickIndex: null, availablePlayers: [{ ...finalBase, id: "extra-rb", position: "RB" }], profile, totalRounds: 15 });
 assert.ok(dstDecision.score > rbDecision.score + 500, "final-pick feasibility should force the missing defense");
+
+const strategicBase = { projection: 185, vbd: 20, tier: 2, tierDropoff: 4, tierProbability: .75, sourceRank: 40, adp: 40, yearsExperience: 3 };
+const earlyKicker = scoreCandidate({ ...strategicBase, id: "k", position: "K" }, { roster: [], round: 2, currentPickIndex: 20, nextPickIndex: 39, availablePlayers: [{ ...strategicBase, id: "k", position: "K" }], profile, totalRounds: 15 });
+assert.ok(earlyKicker.factors.some((factor) => factor.label === "Draft window" && factor.impact <= -100), "kicker must be reserved for the final round");
+const unavailable = scoreCandidate({ ...strategicBase, id: "out-rb", position: "RB", liveStatus: "active", injury: "Out" }, { roster: [], round: 1, currentPickIndex: 10, nextPickIndex: 29, availablePlayers: [{ ...strategicBase, id: "out-rb", position: "RB" }], profile, totalRounds: 15 });
+const healthy = scoreCandidate({ ...strategicBase, id: "healthy-rb", position: "RB" }, { roster: [], round: 1, currentPickIndex: 10, nextPickIndex: 29, availablePlayers: [{ ...strategicBase, id: "healthy-rb", position: "RB" }], profile, totalRounds: 15 });
+assert.ok(unavailable.score < healthy.score - 45, "a current Out designation must materially lower the recommendation");
+const upside = scoreCandidate({ ...strategicBase, id: "rookie-rb", position: "RB", yearsExperience: 0, depthOrder: 2, floor: 110, ceiling: 270 }, { roster: Array.from({ length: 7 }, (_, index) => ({ ...strategicBase, id: `roster-${index}`, position: index % 2 ? "WR" : "RB" })), round: 9, currentPickIndex: 90, nextPickIndex: 109, availablePlayers: [{ ...strategicBase, id: "rookie-rb", position: "RB", yearsExperience: 0, depthOrder: 2, floor: 110, ceiling: 270 }], profile, totalRounds: 15 });
+assert.ok(upside.factors.some((factor) => factor.label === "Bench upside" && factor.impact >= 7), "late-round contingent rookies should receive an upside signal");
+assert.equal(new Set(Array.from({ length: 6 }, (_, team) => opponentStrategyForTeam(team).id)).size, 6, "the room should contain six distinct opponent archetypes");
+const wrCore = opponentStrategyImpact({ position: "WR", tier: 2 }, { roster: [], round: 2, team: 2, recentPicks: [] });
+const wrCoreRb = opponentStrategyImpact({ position: "RB", tier: 2 }, { roster: [], round: 2, team: 2, recentPicks: [] });
+assert.ok(wrCore.impact > wrCoreRb.impact, "WR Core opponents should prefer early receivers");
+const lateQb = opponentStrategyImpact({ position: "QB", tier: 1 }, { roster: [], round: 3, team: 5, recentPicks: [] });
+assert.ok(lateQb.impact < 0, "Late QB opponents should resist early quarterbacks");
 
 const sampleRows = parseCsv(await readFile(new URL("../examples/ffanalytics-sample.csv", import.meta.url), "utf8"));
 const samplePlayers = [

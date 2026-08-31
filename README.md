@@ -4,7 +4,7 @@ A dependency-free, browser-based snake draft assistant built from the supplied N
 
 **Live site:** [vbui31.github.io/Fantasy-Football-Picker](https://vbui31.github.io/Fantasy-Football-Picker/)
 
-The simulator supports animated opponent picks, run-to-your-pick mode, full-draft simulation with pause/resume, league-wide roster grades, and draft state saved in the browser.
+The simulator supports animated opponent picks, run-to-your-pick mode, full-draft simulation with pause/resume, league-wide roster grades, six distinct opponent strategy archetypes, and draft state saved in the browser.
 
 ## Feedback
 
@@ -65,9 +65,21 @@ node scripts/build-player-pool.mjs "C:\path\to\player-registry.json"
 
 The browser app is static and has no runtime dependencies. Draft state is stored in `localStorage`.
 
+## Daily player context
+
+The committed `data/live-player-context.json` snapshot enriches the board with current Sleeper roster status, injuries, practice participation, depth chart, news-update timestamps, and 24-hour add/drop activity. Prior completed-season player statistics come from nflverse and are used only as a bounded historical cross-check. The site disables availability overrides when a snapshot is more than 48 hours old.
+
+Refresh it locally with:
+
+```powershell
+npm run refresh:live
+```
+
+Sleeper asks clients to download its full NFL player map no more than once per day, so the updater keeps a 20-hour cache unless `--force` is supplied. GitHub Pages refreshes the deployed snapshot every day. The integration does not claim to provide live game scoring or licensed news text; `newsUpdated` is a timestamp only.
+
 ## Mock-draft training
 
-Opponent timing and roster targets use derived calibration constants from prior mock-draft observations. The raw research notes and captured simulation profiles stay local and are intentionally excluded from the public website. The published calibration delays QB/TE backups and special teams while producing more realistic RB/WR depth.
+Opponent timing and roster targets use derived calibration constants from prior mock-draft observations. The room rotates Adaptive Value, Hero RB, WR Core, Robust RB, Elite TE, and Late QB profiles, each with soft biases rather than hard scripts. The published calibration delays QB/TE backups and special teams, recognizes tier runs without blindly chasing them, and produces more realistic RB/WR depth.
 
 ## Decision model
 
@@ -76,7 +88,7 @@ The picker incorporates the useful concepts from [cbratkovics/fantasy-football-a
 - league- and roster-size-aware replacement ranks drive dynamic value above replacement;
 - a dependency-free probabilistic clustering pass creates position tiers and tier confidence;
 - snake-draft timing and ADP/market rank estimate the chance a player survives until the team's next pick;
-- recommendations blend VBD, roster fit, tier depletion, wait risk, projection uncertainty, injury status, and reach discipline;
+- recommendations blend VBD, roster fit, tier depletion, wait risk, projection uncertainty, current availability, bounded historical production, weak market trends, and reach discipline;
 - every recommendation exposes its highest-impact factors in the UI.
 
 The calculation lives in `draft-model.js` and produces browser-safe numbers only. It is a decision layer over the current projections, not a claim that registry estimates are a trained forecasting model.

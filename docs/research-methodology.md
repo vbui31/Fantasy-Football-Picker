@@ -26,6 +26,28 @@ Before scoring a candidate, the picker calculates the minimum number of selectio
 
 This adapts the prediction-then-optimization architecture used in both the NFL daily-fantasy and FPL recommendation papers to a sequential snake draft.
 
+### Tier cliffs, draft windows, and upside
+
+The five supplied 2026 strategy guides agree more strongly on process than on exact player order: draft from tiers, stay flexible early, preserve scarce RB/WR depth, use an elite-or-wait approach at tight end, be patient at quarterback in one-QB rooms, take defense late and kicker last, and prefer contingent workload or breakout paths on the bench. These are implemented as transparent score adjustments rather than inflexible round rules. Draft-slot-specific and publisher-specific recommendations remain soft priors because the articles disagree on the exact early-round RB/WR mix.
+
+The late-round utility now rewards ceiling range, rookie/youth uncertainty, and No. 2 depth-chart roles while portfolio logic balances those bets against the reliability of the roster already drafted. Automatic same-team running-back handcuff bonuses are deliberately absent: the behavioral study did not find a meaningful win-rate benefit from that common practice.
+
+### Human opponent behavior
+
+Simulated teams are no longer noisy copies of one ranking. Six repeatable archetypes—Adaptive Value, Hero RB, WR Core, Robust RB, Elite TE, and Late QB—apply soft preferences over the shared value model. Recent position runs create limited urgency, reflecting the study's observed herding, but quarterbacks, kickers, and defenses cannot override the underlying draft-window discipline merely because other teams started a run. This yields varied but still defensible opponents.
+
+### Live metadata and data quality
+
+The daily snapshot uses Sleeper as the current identity/availability layer and nflverse as historical production context. Current injury, practice, roster, and depth-chart fields can materially lower a score; 24-hour add/drop activity is capped as a weak signal. Prior-season PPR pace is capped to a six-point adjustment so it can challenge an estimate without becoming a naive last-year-points ranking.
+
+Quality gates and limits are explicit:
+
+- at least 80% of the bundled registry must match Sleeper or the updater fails;
+- availability overrides expire after 48 hours;
+- Sleeper's player-map download is cached for 20 hours to respect its once-daily guidance;
+- nflverse history is not a live scoring feed and will be missing for rookies and some inactive players;
+- `newsUpdated` proves only that source metadata changed; no headline content or sentiment is inferred.
+
 ## What requires more data
 
 A later training pipeline can add exponentially weighted recent form, opposing-defense and schedule features, position-specific forecasting models, and chronological backtesting. Those signals are intentionally not synthesized from registry rank. When weekly observations become available, evaluate both forecast error (MAE/RMSE) and downstream draft outcomes; the papers show that optimizing one does not guarantee the other.
@@ -35,3 +57,8 @@ A later training pipeline can add exponentially weighted recent form, opposing-d
 - Roman Lutz, *Fantasy Football Prediction*, arXiv:1505.06918v1 (2015).
 - Jonathan Robert Landers and Brian Duperrouzel, *Machine Learning Approaches to Competing in Fantasy Leagues for the NFL*, IEEE Transactions on Games 11(2) (2019).
 - Vimal Rajesh, P. Arjun, Kunal Ravikumar Jagtap, Suneera C. M., and Jay Prakash, *Player Recommendation System for Fantasy Premier League using Machine Learning* (JCSSE 2022).
+- Footballguys, *2026 Draft Strategy: Rankings, Tiers, and the League-Winning Formula* (2026).
+- CBS Sports, *2026 Fantasy football draft strategy: Best approach for every pick* (2026).
+- Andrew Anotado, Arash Tavakoli, and Katia Sycara, *Drafting Strategies in Fantasy Football: A Study of Competitive Sequential Human Decision-Making* (2020).
+- QB List, *The Ultimate Fantasy Football Draft Guide 2026 – Who To Draft & When* (2026).
+- Establish the Run, *Understanding the 2026 fantasy football meta* (2026).

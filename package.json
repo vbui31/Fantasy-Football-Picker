@@ -6,6 +6,7 @@
   "description": "A dependency-free fantasy football snake draft assistant.",
   "scripts": {
     "build:data": "node scripts/build-player-pool.mjs",
+    "refresh:live": "node scripts/update-live-context.mjs",
     "refresh:projections": "Rscript scripts/export_ffanalytics.R data/ffanalytics-projections.csv ppr",
     "test": "node scripts/model-self-test.mjs",
     "serve": "node scripts/serve.mjs"
