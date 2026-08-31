@@ -38,6 +38,18 @@ Simulated teams are no longer noisy copies of one ranking. Six repeatable archet
 
 The production implementation treats these as latent strategies rather than permanent labels. Opponents start with uniform probabilities; every pick performs a bounded Bayesian-style likelihood update. Room-local observations can change the current simulation immediately, but the global model is promoted only through the repository's leakage-safe learning skill.
 
+## Independent provider consensus
+
+FantasyPros preseason PPR projections and SportsDataIO projected season statistics with PPR ADP are fetched in GitHub Actions using repository secrets. Raw credentials and raw provider payloads are never shipped to the browser. Records are normalized to the bundled Sleeper player IDs by name, position, and team; projections outside plausible position-specific ranges are rejected, snapshots older than seven days are disabled, and a provider needs at least 50 matched players before it can influence recommendations or grades.
+
+When both providers cover a player, their weighted projection consensus contributes a bounded 35–75% of the production projection. One-provider coverage receives a smaller effective weight. Cross-provider disagreement widens the player's uncertainty interval instead of disappearing into the mean. League Results recompute team grades separately from FantasyPros, SportsDataIO, and their consensus so rank disagreement remains visible.
+
+## Per-draft online adjustment
+
+A completed draft can update the device-local provider influence once. The update compares user selections with the best same-position player that was still available according to the dual-provider consensus, maintains an exponential moving average of regret, and moves influence by at most two percentage points per qualifying draft. At least five dual-provider user selections are required, draft IDs are deduplicated, and the influence is hard-clamped to 35–75%.
+
+This is preference alignment to independent projection evidence, not proof of real-world accuracy. Global strategy promotion still requires chronological backtests against realized NFL outcomes under the stricter learning contract.
+
 ### PPR Monte Carlo completion
 
 Recommendations are no longer judged only at the current pick. For each of the three strongest legal candidates, the browser completes 16 stochastic draft paths using league roster constraints, learned opponent mixtures, tier value, positional need, and controlled Gumbel variation. It compares the completed PPR roster on expected weekly starters, expected wins, downside, upside, and next-turn player survival. This is deliberately small enough to run during a live draft; it is not presented as a season forecast.

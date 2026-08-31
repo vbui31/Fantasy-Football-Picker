@@ -121,7 +121,18 @@ Roster grades now compare projected weekly starters, bench VBD, floor/ceiling ra
 
 Completed and abandoned rooms are also written to a browser-local draft ledger. The ledger preserves league settings, selections, local grades, independent grades, and feedback counts, can be reviewed in **League Results → Draft log**, and can be exported as JSON. Matching completed rooms calibrate the current raw roster score against past grades without treating those historical model outputs as ground truth.
 
-An optional independent grader can be configured in **Draft Setup**. Because GitHub Pages is static, provider credentials must stay behind an HTTPS server-side proxy; never commit FantasyPros, SportsDataIO, or other API keys to this repository. War Room validates the external response, preserves provider/version/methodology provenance, displays local and external grades separately, and flags large disagreement instead of allowing an outside score to silently overwrite recommendations. See [the external grader API contract](docs/external-grader-api.md).
+FantasyPros and SportsDataIO are first-class independent evidence providers. The deployment workflow reads `FANTASYPROS_API_KEY` and `SPORTSDATAIO_API_KEY` from GitHub repository secrets, fetches 2026 PPR season projections, normalizes players into Sleeper IDs, and publishes only the safe projection snapshot. Provider keys never reach the browser. League Results show separate FantasyPros, SportsDataIO, and combined provider grades with rank-disagreement warnings.
+
+After each completed draft with enough dual-provider coverage, the browser computes same-position recommendation regret against the independent consensus and applies one deduplicated, bounded update to provider influence. The influence is constrained to 35–75%, a draft can train only once, and drafts without at least five dual-provider user selections do not update the model. This lets the assistant adapt after qualifying drafts without allowing a single self-generated mock to rewrite the strategy.
+
+Configure the repository secrets once:
+
+```bash
+gh secret set FANTASYPROS_API_KEY
+gh secret set SPORTSDATAIO_API_KEY
+```
+
+Then run the **Deploy GitHub Pages** workflow or wait for its daily schedule. `npm run refresh:providers` can also refresh `data/provider-projections.json` locally when the same environment variables are present.
 
 The in-app historical evaluation joins completed rosters to bundled prior-season outcomes and reports coverage, recommendation regret, projection MAE, legal-lineup rate, playoff probability, and championship probability by draft slot. It is explicitly labeled exploratory until matching archived draft-time projection and ADP snapshots are provided; future information must never be promoted into production weights.
 

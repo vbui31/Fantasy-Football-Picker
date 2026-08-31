@@ -1,7 +1,8 @@
 import { enrichPlayerModel, scoreCandidate } from "./draft-model.js";
 import { buildProjectionDataset, normalizedName, parseCsv } from "./ffanalytics-data.js";
 import { backtestCompletedDraft, createOpponentBeliefs, dominantOpponentStyle, evaluateRoster, expectedOpponentBias, normalizeLeagueSettings, runMonteCarloRestOfDraft, updateOpponentBelief } from "./draft-intelligence.js";
-import { createDraftId, getDraftLogs, historicalCalibration, putDraftLog, settingsFingerprint, validateExternalGradeResponse } from "./draft-audit.js";
+import { createDraftId, getDraftLogs, historicalCalibration, putDraftLog, settingsFingerprint } from "./draft-audit.js";
+import { applyProviderProjections, loadLearningProfile, providerRosterGrades, saveLearningProfile, updateLearningFromDraft } from "./provider-intelligence.js";
 
 const POSITIONS = ["ALL", "RB", "WR", "QB", "TE", "FLEX", "K", "DST"];
 const OPPONENT_PROFILE = {
@@ -10,9 +11,7 @@ const OPPONENT_PROFILE = {
   medianFirstRound: { QB: 7, TE: 7, K: 15, DST: 14 }
 };
 const STORAGE_KEY = "war-room-draft-v1";
-const GRADER_ENDPOINT_KEY = "war-room-grader-endpoint-v1";
-const GRADER_TOKEN_KEY = "war-room-grader-token-v1";
-const GRADE_MODEL_VERSION = "ppr-grade-v2";
+const GRADE_MODEL_VERSION = "ppr-grade-v3";
 
 const elements = Object.fromEntries([
   "playerRows", "poolCount", "searchInput", "positionFilters", "methodology", "clockTeam", "roundLabel",
@@ -24,7 +23,7 @@ const elements = Object.fromEntries([
   "scarcityPanel", "compareDialog", "closeCompareButton", "compareContent", "draftPreset", "draftFormat", "scoringFormat",
   "slotQB", "slotRB", "slotWR", "slotTE", "slotFlex", "slotSuperflex", "slotK", "slotDST", "tePremium", "auctionBudget",
   "sleeperLeagueId", "importSleeperButton", "sleeperImportStatus", "keepersInput", "tradedPicksInput", "exportDraftButton",
-  "shareDraftButton", "runBacktestButton", "draftLogButton", "externalGradeButton", "graderAudit", "graderEndpoint", "graderToken", "graderConfigStatus"
+  "shareDraftButton", "runBacktestButton", "draftLogButton", "providerAudit"
 ].map((id) => [id, document.getElementById(id)]));
 
 let dataset;
@@ -36,11 +35,14 @@ let isSimulating = false;
 let comparisonSelection = new Set();
 let monteCarlo = { key: null, results: null, running: false };
 let draftHistory = [];
+let providerSnapshot = null;
+let providerSummary = { matchedPlayers: 0, usableProviders: [], influence: 0 };
+let learningProfile = loadLearningProfile();
 let state = loadState();
 
 function defaultState() {
   const settings = normalizeLeagueSettings({ teams: 10, userSlot: 5, rounds: 15, autoOpponents: true, simulationPace: 220, preset: "balanced" });
-  return { version: 3, draftId: createDraftId(), startedAt: new Date().toISOString(), settings, picks: [], keepers: [], tradedPicks: {}, cursor: 0, model: null, opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot), feedback: [], leagueImport: null, externalGrade: null, simulationSeed: Math.floor(Math.random() * 2 ** 31) };
+  return { version: 3, draftId: createDraftId(), startedAt: new Date().toISOString(), settings, picks: [], keepers: [], tradedPicks: {}, cursor: 0, model: null, opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot), feedback: [], leagueImport: null, simulationSeed: Math.floor(Math.random() * 2 ** 31) };
 }
 
 function loadState() {
@@ -49,7 +51,7 @@ function loadState() {
     if ([1, 2, 3].includes(saved?.version) && Array.isArray(saved.picks)) {
       const defaults = defaultState();
       const settings = normalizeLeagueSettings({ ...defaults.settings, ...saved.settings });
-      return { ...defaults, ...saved, version: 3, draftId: saved.draftId || createDraftId(), startedAt: saved.startedAt || new Date().toISOString(), settings, keepers: saved.keepers || [], tradedPicks: saved.tradedPicks || {}, cursor: Number.isInteger(saved.cursor) ? saved.cursor : saved.picks.length, opponentBeliefs: saved.opponentBeliefs || createOpponentBeliefs(settings.teams, settings.userSlot), feedback: saved.feedback || [], externalGrade: saved.externalGrade || null };
+      return { ...defaults, ...saved, version: 3, draftId: saved.draftId || createDraftId(), startedAt: saved.startedAt || new Date().toISOString(), settings, keepers: saved.keepers || [], tradedPicks: saved.tradedPicks || {}, cursor: Number.isInteger(saved.cursor) ? saved.cursor : saved.picks.length, opponentBeliefs: saved.opponentBeliefs || createOpponentBeliefs(settings.teams, settings.userSlot), feedback: saved.feedback || [] };
     }
   } catch { /* A fresh board is safer than a broken saved state. */ }
   return defaultState();
@@ -147,6 +149,10 @@ function recalculateModel() {
     player.adpDeviation = null;
     player.auctionValue = null;
     player.expertRank = null;
+    player.localProjection = null;
+    player.providerProjection = null;
+    player.providerSources = null;
+    player.providerDisagreement = null;
     player.modelSource = "registry";
   }
 
@@ -158,14 +164,17 @@ function recalculateModel() {
     }
   }
 
+  providerSummary = applyProviderProjections(dataset.players, providerSnapshot, learningProfile);
+
   const replacement = enrichPlayerModel(dataset.players, state.settings);
 
   dataset.players.sort((a, b) => b.vbd - a.vbd || b.projection - a.projection || a.sourceRank - b.sourceRank);
   dataset.players.forEach((player, index) => { player.rank = index + 1; });
   const consensus = state.model?.source === "ffanalytics";
+  const providersReady = providerSummary.usableProviders.length > 0;
   const liveLabel = dataset.liveData?.fresh ? ` · Live ${dataset.liveData.matches}` : "";
-  elements.modelState.textContent = consensus ? `Consensus · ${state.model.matches} matched${liveLabel}` : `Registry model${liveLabel}`;
-  elements.modelState.classList.toggle("consensus", consensus);
+  elements.modelState.textContent = providersReady ? `${providerSummary.usableProviders.length} provider${providerSummary.usableProviders.length > 1 ? "s" : ""} · ${providerSummary.matchedPlayers} matched${liveLabel}` : consensus ? `Consensus · ${state.model.matches} matched${liveLabel}` : `Registry model${liveLabel}`;
+  elements.modelState.classList.toggle("consensus", consensus || providersReady);
   elements.importStatus.textContent = consensus
     ? `${state.model.matches} players matched from ${state.model.fileName}${state.model.scoringFormat ? ` · ${state.model.scoringFormat.toUpperCase()}` : ""}${state.model.generatedAt ? ` · generated ${new Intl.DateTimeFormat().format(new Date(state.model.generatedAt))}` : ""}. ${state.model.unmatched} rows were unmatched or unusable.`
     : "No consensus file loaded.";
@@ -173,9 +182,10 @@ function recalculateModel() {
   const liveMethod = dataset.liveData?.fresh
     ? ` Daily Sleeper availability, practice, depth-chart, and trend context refreshed ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(dataset.liveData.generatedAt))}; nflverse prior-season stats provide historical context. News timestamps are metadata only, not headline sentiment.`
     : liveContext ? " The bundled live context is older than 48 hours, so availability overrides are disabled." : " Live context is unavailable; registry metadata remains in use.";
+  const providerMethod = providersReady ? ` FantasyPros and SportsDataIO contribute ${Math.round(learningProfile.providerInfluence * 100)}% of the projection blend when both cover a player; ${providerSummary.matchedPlayers} players currently have independent provider evidence. Provider disagreement expands uncertainty rather than being averaged away.` : " FantasyPros and SportsDataIO snapshots are not configured, so no provider-derived grade or learning adjustment is active.";
   elements.methodology.textContent = (consensus
     ? `ffanalytics weighted consensus from ${state.model.fileName} supplies projections, ranges, expert ranks, ADP, auction values, and uncertainty. Research-derived reliability, phase-aware floor/ceiling utility, dynamic replacement levels (${Object.entries(replacement).map(([position, rank]) => `${position}${rank}`).join(", ")}), roster feasibility, probabilistic tiers, and next-turn availability are recalculated for this room.`
-    : `${dataset.methodology} Research-derived reliability, rookie cold-start handling, roster feasibility, dynamic replacement levels, probabilistic tiers, and next-turn availability are recalculated for this ${state.settings.teams}-team room.`) + ` The production contract is full PPR; replacement ranks respond to ${state.settings.superflex ? "superflex" : "one-QB"} roster demand${state.settings.tePremium ? ` and a +${state.settings.tePremium} TE premium` : ""}. Recommendations are checked with stochastic rest-of-draft simulations and adaptive opponent beliefs.` + liveMethod;
+    : `${dataset.methodology} Research-derived reliability, rookie cold-start handling, roster feasibility, dynamic replacement levels, probabilistic tiers, and next-turn availability are recalculated for this ${state.settings.teams}-team room.`) + providerMethod + ` The production contract is full PPR; replacement ranks respond to ${state.settings.superflex ? "superflex" : "one-QB"} roster demand${state.settings.tePremium ? ` and a +${state.settings.tePremium} TE premium` : ""}. Recommendations are checked with stochastic rest-of-draft simulations and adaptive opponent beliefs.` + liveMethod;
 }
 
 function draftedPlayersForTeam(team) {
@@ -400,7 +410,7 @@ function renderRecommendation() {
   if (!best) return;
   const gap = picks[0].score - (picks[1]?.score ?? picks[0].score);
   elements.confidence.textContent = gap > 15 ? "Strong edge" : gap > 6 ? "Clear lean" : "Close call";
-  const consensusMeta = best.modelSource === "ffanalytics" ? `${best.projectionMethod?.toUpperCase() || "FFA"} CONSENSUS${best.consensusTier ? ` · SOURCE TIER ${best.consensusTier}` : ""}` : best.depthOrder === 1 ? "PROJECTED STARTER" : "ACTIVE ROSTER";
+  const consensusMeta = best.modelSource === "multi-provider" ? `${Object.keys(best.providerSources || {}).map((source) => source === "fantasypros" ? "FANTASYPROS" : "SPORTSDATAIO").join(" + ")} CONSENSUS${best.providerDisagreement ? ` · ±${(best.providerDisagreement / 2).toFixed(1)}` : ""}` : best.modelSource === "ffanalytics" ? `${best.projectionMethod?.toUpperCase() || "FFA"} CONSENSUS${best.consensusTier ? ` · SOURCE TIER ${best.consensusTier}` : ""}` : best.depthOrder === 1 ? "PROJECTED STARTER" : "ACTIVE ROSTER";
   const factorRows = bestPick.factors.slice(0, 4).map((factor) => `<li><span>${escapeHtml(factor.label)}</span><strong class="${factor.impact >= 0 ? "positive" : "negative"}">${factor.impact >= 0 ? "+" : ""}${factor.impact.toFixed(1)}</strong><small>${escapeHtml(factor.detail)}</small></li>`).join("");
   const mc = hasSimulation ? monteCarlo.results[best.id] : null;
   const survivalRows = mc ? picks.slice(1, 5).map(({ player }) => {
@@ -463,24 +473,25 @@ function renderLeagueResults() {
     : "Team grades update after every pick and compare value, projected output, and roster coverage.";
   const userRow = teamRows.find((row) => row.team === state.settings.userSlot);
   const calibration = historicalCalibration(userRow?.score, draftHistory, { ...state.settings, gradeVersion: GRADE_MODEL_VERSION }, state.draftId);
-  const externalByTeam = new Map((state.externalGrade?.teams || []).map((entry) => [entry.team, entry]));
-  const externalPercentile = new Map([...(state.externalGrade?.teams || [])].sort((a, b) => b.score - a.score).map((entry, index, rows) => [entry.team, rows.length > 1 ? (1 - index / (rows.length - 1)) * 100 : 50]));
-  elements.graderAudit.innerHTML = state.externalGrade
-    ? `<strong>Independent audit · ${escapeHtml(state.externalGrade.provider)}</strong><span>${escapeHtml(state.externalGrade.methodology)} · ${escapeHtml(state.externalGrade.modelVersion)} · ${new Date(state.externalGrade.gradedAt).toLocaleString()}</span>`
-    : `<strong>Local model only</strong><span>No independent grade has been requested. Local grades are relative to this room and are not objective truth.</span>`;
-  if (calibration.sampleSize) elements.graderAudit.innerHTML += `<span>Your raw roster score is at the ${Math.round(calibration.percentile * 100)}th percentile across ${calibration.sampleSize} prior completed drafts with matching settings. Historical comparison is context, not ground truth.</span>`;
+  const providerGradeSets = Object.fromEntries([...providerSummary.usableProviders, ...(providerSummary.usableProviders.length ? ["consensus"] : [])].map((provider) => [provider, new Map(providerRosterGrades(leagueRosters, state.settings, provider).map((grade) => [grade.team, grade]))]));
+  const providerLabels = { fantasypros: "FantasyPros", sportsdataio: "SportsDataIO", consensus: "Provider consensus" };
+  const providerStatus = ["fantasypros", "sportsdataio"].map((provider) => `${providerLabels[provider]}: ${providerSnapshot?.providers?.[provider]?.status || "not-configured"} · ${providerSnapshot?.providers?.[provider]?.matches || 0} matched`).join(" · ");
+  elements.providerAudit.innerHTML = `<strong>Independent provider grading</strong><span>${escapeHtml(providerStatus)}. Provider projections are blended into recommendations at ${Math.round(learningProfile.providerInfluence * 100)}% influence when both sources cover a player.</span><span>Learning: ${learningProfile.completedDrafts} qualifying drafts · provider regret EMA ${learningProfile.regretEma == null ? "pending" : `${learningProfile.regretEma.toFixed(1)} points`}. Updates are bounded and require dual-provider coverage.</span>`;
+  if (calibration.sampleSize) elements.providerAudit.innerHTML += `<span>Your raw roster score is at the ${Math.round(calibration.percentile * 100)}th percentile across ${calibration.sampleSize} prior completed drafts with matching settings. Historical comparison is context, not ground truth.</span>`;
   elements.leagueGrid.innerHTML = teamRows.map(({ team, players, grade, evaluation, roomPercentile }, index) => {
     const counts = countPositions(players);
     const style = dominantOpponentStyle(state.opponentBeliefs[team]);
     const spent = state.picks.filter((pick) => pick.team === team).reduce((sum, pick) => sum + (pick.price || 0), 0);
     const budgetLine = state.settings.draftFormat === "auction" ? `<span>$${spent} spent · $${state.settings.auctionBudget - spent} left</span>` : "";
-    const external = externalByTeam.get(team);
-    const disagreement = external ? Math.abs((externalPercentile.get(team) ?? 50) - roomPercentile) : 0;
-    const externalLine = external ? `<span class="external-score ${disagreement >= 20 ? "disagrees" : ""}">External ${escapeHtml(external.grade)} · ${external.score.toFixed(1)}/100${disagreement >= 20 ? " · rank disagreement" : ""}</span>` : "";
+    const providerLines = Object.entries(providerGradeSets).map(([provider, grades]) => {
+      const providerGrade = grades.get(team);
+      const disagreement = providerGrade ? Math.abs(providerGrade.rank - (index + 1)) >= Math.max(2, Math.floor(state.settings.teams * .25)) : false;
+      return providerGrade ? `<span class="external-score ${disagreement ? "disagrees" : ""}">${providerLabels[provider]} ${escapeHtml(providerGrade.grade)} · ${providerGrade.weekly.toFixed(1)}/wk · ${providerGrade.coveredPlayers}/${players.length || 0} covered${disagreement ? " · rank disagreement" : ""}</span>` : "";
+    }).join("");
     const explanation = evaluation.explanations.slice(0, 4).map((item) => `<span><strong>${escapeHtml(item.label)}</strong><br>${escapeHtml(item.value)}</span>`).join("");
     return `<article class="team-card ${team === state.settings.userSlot ? "is-user" : ""}">
       <header><div><span>${index === 0 && players.length ? "ROOM LEADER" : `DRAFT SLOT ${team + 1}`} · ${team === state.settings.userSlot ? "RECOMMENDATION MODEL" : `${escapeHtml(style.name.toUpperCase())} ${Math.round(style.confidence * 100)}%`}</span><h3>${escapeHtml(teamName(team))}</h3></div><strong>${grade}</strong></header>
-      <div class="team-card-stats"><span>${players.length} players</span><span>${evaluation.weekly.toFixed(1)} PPR/wk</span><span>${Math.round(evaluation.expectedWins * 100)}% expected wins</span>${budgetLine}${externalLine}<span>QB ${counts.QB || 0} · RB ${counts.RB || 0} · WR ${counts.WR || 0} · TE ${counts.TE || 0}</span></div>
+      <div class="team-card-stats"><span>${players.length} players</span><span>${evaluation.weekly.toFixed(1)} PPR/wk</span><span>${Math.round(evaluation.expectedWins * 100)}% expected wins</span>${budgetLine}${providerLines}<span>QB ${counts.QB || 0} · RB ${counts.RB || 0} · WR ${counts.WR || 0} · TE ${counts.TE || 0}</span></div>
       <div class="grade-explain">${explanation}</div>
       <ol>${players.map((player) => `<li><span class="pos-badge pos-${player.position}">${player.position}</span><strong>${escapeHtml(player.name)}</strong><small>${player.team}</small></li>`).join("") || "<li class=\"team-empty\">No picks yet.</li>"}</ol>
     </article>`;
@@ -506,7 +517,6 @@ function draftPlayer(playerId, isAuto = false) {
   state.opponentBeliefs[context.team] = updateOpponentBelief(state.opponentBeliefs[context.team], { player, rosterBefore, round: context.round, pickNumber: context.overall, recentPicks: recentDraftedPlayers() });
   const price = state.settings.draftFormat === "auction" ? suggestedAuctionPrice(player) : null;
   state.picks.push({ playerId, team: context.team, index: context.overall - 1, price });
-  state.externalGrade = null;
   state.cursor = nextOpenDraftIndex(context.overall);
   monteCarlo = { key: null, results: null, running: false };
   saveState();
@@ -579,7 +589,6 @@ function undo() {
   }
   state.cursor = state.picks.length ? nextOpenDraftIndex(state.picks[state.picks.length - 1].index + 1) : 0;
   rebuildOpponentBeliefs();
-  state.externalGrade = null;
   monteCarlo = { key: null, results: null, running: false };
   saveState();
   renderAll();
@@ -712,9 +721,6 @@ function openSetup() {
   elements.sleeperLeagueId.value = state.leagueImport?.leagueId || "";
   elements.keepersInput.value = state.keepers.map((keeper) => `Team ${keeper.team + 1}: ${dataset.players.find((player) => player.id === keeper.playerId)?.name || keeper.playerId}`).join("\n");
   elements.tradedPicksInput.value = Object.entries(state.tradedPicks).map(([pick, team]) => `${pick}: Team ${team + 1}`).join("\n");
-  elements.graderEndpoint.value = localStorage.getItem(GRADER_ENDPOINT_KEY) || "";
-  elements.graderToken.value = sessionStorage.getItem(GRADER_TOKEN_KEY) || "";
-  elements.graderConfigStatus.textContent = elements.graderEndpoint.value ? "Endpoint saved on this device. Bearer tokens remain in this browser tab only." : "No external grader configured. API credentials are never saved in the draft report.";
   setRosterSlotFields(state.settings.rosterSlots);
   populateSlots();
   recalculateModel();
@@ -751,7 +757,6 @@ async function startNewDraft(event) {
     opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot),
     feedback: [],
     leagueImport: state.leagueImport,
-    externalGrade: null,
     simulationSeed: Math.floor(Math.random() * 2 ** 31)
   };
   comparisonSelection.clear();
@@ -855,6 +860,7 @@ function recordRecommendationFeedback(sentiment, playerId) {
 
 function draftReport() {
   const rosters = allRosters();
+  const providerGrades = Object.fromEntries([...providerSummary.usableProviders, ...(providerSummary.usableProviders.length ? ["consensus"] : [])].map((provider) => [provider, providerRosterGrades(rosters, state.settings, provider)]));
   return {
     schemaVersion: 2,
     generatedAt: new Date().toISOString(),
@@ -866,7 +872,8 @@ function draftReport() {
     tradedPicks: state.tradedPicks,
     opponents: state.opponentBeliefs,
     teams: rosters.map((roster, team) => ({ team, grade: rosterGrade(roster), evaluation: evaluateRoster(roster, state.settings, rosters), players: roster.map((player) => ({ id: player.id, name: player.name, position: player.position, team: player.team, projection: player.projection })) })),
-    externalGrade: state.externalGrade,
+    providerEvidence: { generatedAt: providerSnapshot?.generatedAt || null, providers: providerSnapshot?.providers || {}, grades: providerGrades },
+    learningProfile,
     feedback: state.feedback
   };
 }
@@ -884,84 +891,38 @@ function currentDraftLogEntry(status = isComplete() ? "complete" : "in-progress"
     gradeModelVersion: GRADE_MODEL_VERSION,
     settings: { teams: state.settings.teams, rounds: state.settings.rounds, userSlot: state.settings.userSlot, draftFormat: state.settings.draftFormat, rosterSlots: state.settings.rosterSlots, tePremium: state.settings.tePremium },
     pickCount: state.picks.length + state.keepers.length,
-    picks: state.picks.map((pick) => ({ playerId: pick.playerId, team: pick.team, index: pick.index, price: pick.price || null })),
+    picks: state.picks.map((pick) => { const player = dataset.players.find((item) => item.id === pick.playerId); return { playerId: pick.playerId, team: pick.team, index: pick.index, price: pick.price || null, position: player?.position || null }; }),
     keepers: state.keepers,
     userScore: userTeam?.evaluation?.score ?? null,
     userGrade: userTeam?.grade ?? "—",
     teamResults: report.teams.map((team) => ({ team: team.team, grade: team.grade, score: team.evaluation.score, weekly: team.evaluation.weekly, expectedWins: team.evaluation.expectedWins })),
-    externalGrade: state.externalGrade,
+    providerGrades: report.providerEvidence.grades,
+    learning: { completedDrafts: learningProfile.completedDrafts, providerInfluence: learningProfile.providerInfluence, regretEma: learningProfile.regretEma },
     feedbackCount: state.feedback.length
   };
 }
 
 async function logCurrentDraft(status) {
   if (!state.picks.length && !state.keepers.length) return null;
+  if (status === "complete") {
+    const learning = updateLearningFromDraft(learningProfile, { draftId: state.draftId, picks: state.picks, keepers: state.keepers, players: dataset.players, userSlot: state.settings.userSlot, teams: state.settings.teams, draftFormat: state.settings.draftFormat });
+    if (learning.updated) {
+      learningProfile = learning.profile;
+      saveLearningProfile(learningProfile);
+      recalculateModel();
+      if (elements.leagueDialog.open) renderLeagueResults();
+    }
+  }
   const entry = await putDraftLog(currentDraftLogEntry(status));
   draftHistory = [entry, ...draftHistory.filter((item) => item.id !== entry.id)];
   return entry;
 }
 
-function externalGradingDraft() {
-  const rosters = allRosters();
-  return {
-    schemaVersion: 1,
-    scoring: "PPR",
-    settings: state.settings,
-    leagueImport: state.leagueImport ? { leagueId: state.leagueImport.leagueId, name: state.leagueImport.name } : null,
-    picks: state.picks,
-    keepers: state.keepers,
-    tradedPicks: state.tradedPicks,
-    teams: rosters.map((roster, team) => ({ team, players: roster.map((player) => ({ id: player.id, name: player.name, position: player.position, nflTeam: player.team })) }))
-  };
-}
-
-async function runExternalGrade() {
-  const endpoint = (elements.graderEndpoint.value || localStorage.getItem(GRADER_ENDPOINT_KEY) || "").trim();
-  if (!endpoint) { showToast("Add an external grader endpoint in Draft Setup"); return; }
-  let parsed;
-  try { parsed = new URL(endpoint); }
-  catch { showToast("External grader URL is invalid"); return; }
-  if (parsed.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(parsed.hostname)) { showToast("External grader must use HTTPS"); return; }
-  elements.externalGradeButton.disabled = true;
-  elements.externalGradeButton.textContent = "Grading…";
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  try {
-    const token = elements.graderToken.value || sessionStorage.getItem(GRADER_TOKEN_KEY) || "";
-    const headers = { "Content-Type": "application/json", "Accept": "application/json" };
-    if (token) headers.Authorization = `Bearer ${token}`;
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({ schemaVersion: 1, requestId: state.draftId, gradingRequirements: { scoring: "PPR", scoreRange: [0, 100], independentEvidenceRequired: true }, draft: externalGradingDraft() })
-    });
-    if (!response.ok) throw new Error(`External grader returned HTTP ${response.status}.`);
-    const declaredBytes = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declaredBytes) && declaredBytes > 1_000_000) throw new Error("External grader response exceeded 1 MB.");
-    const responseText = await response.text();
-    if (responseText.length > 1_000_000) throw new Error("External grader response exceeded 1 MB.");
-    state.externalGrade = { ...validateExternalGradeResponse(JSON.parse(responseText), state.settings.teams), requestPickCount: state.picks.length + state.keepers.length, draftId: state.draftId };
-    saveState();
-    await logCurrentDraft(isComplete() ? "complete" : "in-progress");
-    renderLeagueResults();
-    showToast(`Independent grade received from ${state.externalGrade.provider}`);
-  } catch (error) {
-    const message = error.name === "AbortError" ? "External grader timed out after 15 seconds." : error.message;
-    elements.graderAudit.innerHTML = `<strong>Independent grade failed</strong><span>${escapeHtml(message)} The local grade was not changed.</span>`;
-    showToast("Independent grade unavailable; local score unchanged");
-  } finally {
-    clearTimeout(timeout);
-    elements.externalGradeButton.disabled = false;
-    elements.externalGradeButton.textContent = "Get independent grade";
-  }
-}
-
 async function openDraftLog() {
   await logCurrentDraft(isComplete() ? "complete" : "in-progress");
   draftHistory = await getDraftLogs();
-  const rows = draftHistory.map((entry) => `<tr><td>${new Date(entry.startedAt).toLocaleString()}</td><td>${escapeHtml(entry.status)}</td><td>${entry.settings?.teams || "—"} teams · ${escapeHtml(entry.settings?.draftFormat || "snake")}</td><td>${entry.pickCount}</td><td>${escapeHtml(entry.userGrade || "—")}${entry.externalGrade ? ` / ${escapeHtml(entry.externalGrade.teams?.find((team) => team.team === entry.settings?.userSlot)?.grade || "—")}` : ""}</td></tr>`).join("");
-  elements.compareContent.innerHTML = `<div class="comparison-card audit-log"><p class="eyebrow">Persistent browser ledger</p><h3>Draft log</h3><p>Every started room is retained on this device. Local and independent grades stay separate so historical comparisons remain auditable.</p><div class="table-wrap"><table><thead><tr><th>Started</th><th>Status</th><th>Format</th><th>Picks</th><th>Local / external</th></tr></thead><tbody>${rows || "<tr><td colspan=\"5\">No drafts logged yet.</td></tr>"}</tbody></table></div><button class="button button-dark" type="button" data-export-ledger>Export complete log</button></div>`;
+  const rows = draftHistory.map((entry) => { const providerGrade = entry.providerGrades?.consensus?.find((grade) => grade.team === entry.settings?.userSlot)?.grade; return `<tr><td>${new Date(entry.startedAt).toLocaleString()}</td><td>${escapeHtml(entry.status)}</td><td>${entry.settings?.teams || "—"} teams · ${escapeHtml(entry.settings?.draftFormat || "snake")}</td><td>${entry.pickCount}</td><td>${escapeHtml(entry.userGrade || "—")}${providerGrade ? ` / ${escapeHtml(providerGrade)}` : ""}</td></tr>`; }).join("");
+  elements.compareContent.innerHTML = `<div class="comparison-card audit-log"><p class="eyebrow">Persistent browser ledger</p><h3>Draft log</h3><p>Every started room is retained on this device. Local and FantasyPros/SportsDataIO consensus grades remain separate and the learning profile records only bounded, dual-provider regret updates.</p><div class="table-wrap"><table><thead><tr><th>Started</th><th>Status</th><th>Format</th><th>Picks</th><th>Local / providers</th></tr></thead><tbody>${rows || "<tr><td colspan=\"5\">No drafts logged yet.</td></tr>"}</tbody></table></div><button class="button button-dark" type="button" data-export-ledger>Export complete log</button></div>`;
   elements.compareDialog.showModal();
 }
 
@@ -1013,19 +974,9 @@ elements.importSleeperButton.addEventListener("click", importSleeperLeague);
 elements.exportDraftButton.addEventListener("click", exportDraftReport);
 elements.shareDraftButton.addEventListener("click", () => copyShareLink().catch(() => showToast("Copy failed; use the address bar link")));
 elements.draftLogButton.addEventListener("click", () => void openDraftLog());
-elements.externalGradeButton.addEventListener("click", () => void runExternalGrade());
 elements.runBacktestButton.addEventListener("click", runDraftBacktest);
 elements.teamCount.addEventListener("change", () => populateSlots(Number(elements.userSlot.value)));
 elements.newDraftButton.addEventListener("click", startNewDraft);
-elements.graderEndpoint.addEventListener("input", () => {
-  const endpoint = elements.graderEndpoint.value.trim();
-  if (endpoint) localStorage.setItem(GRADER_ENDPOINT_KEY, endpoint); else localStorage.removeItem(GRADER_ENDPOINT_KEY);
-  elements.graderConfigStatus.textContent = endpoint ? "Endpoint saved on this device. Bearer tokens remain in this browser tab only." : "No external grader configured. API credentials are never saved in the draft report.";
-});
-elements.graderToken.addEventListener("input", () => {
-  const token = elements.graderToken.value;
-  if (token) sessionStorage.setItem(GRADER_TOKEN_KEY, token); else sessionStorage.removeItem(GRADER_TOKEN_KEY);
-});
 elements.projectionFile.addEventListener("change", async (event) => {
   const file = event.target.files?.[0];
   if (!file) return;
@@ -1064,6 +1015,10 @@ try {
       if (bundled.ok) state.model = modelFromProjectionText(await bundled.text(), "bundled ffanalytics-projections.csv");
     } catch { /* The generated consensus file is optional. */ }
   }
+  try {
+    const providerResponse = await fetch("data/provider-projections.json");
+    if (providerResponse.ok) providerSnapshot = await providerResponse.json();
+  } catch { /* Provider snapshots are optional until repository secrets are configured. */ }
   recalculateModel();
   saveState();
   draftHistory = await getDraftLogs();

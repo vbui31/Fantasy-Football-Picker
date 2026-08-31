@@ -34,6 +34,12 @@ jobs:
       - name: Refresh daily player context
         if: github.event_name != 'push'
         run: npm run refresh:live
+      - name: Refresh FantasyPros and SportsDataIO projections
+        env:
+          FANTASYPROS_API_KEY: ${{ secrets.FANTASYPROS_API_KEY }}
+          SPORTSDATAIO_API_KEY: ${{ secrets.SPORTSDATAIO_API_KEY }}
+          NFL_SEASON: 2026
+        run: npm run refresh:providers
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload static site

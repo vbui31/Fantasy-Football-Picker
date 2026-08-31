@@ -3,7 +3,9 @@ import { readFile } from "node:fs/promises";
 import { availabilityAtNextPick, enrichPlayerModel, evidenceProfile, missingStarterSlots, nextPickIndexForTeam, opponentStrategyForTeam, opponentStrategyImpact, replacementRanks, scoreCandidate } from "../draft-model.js";
 import { buildProjectionDataset, parseCsv } from "../ffanalytics-data.js";
 import { createOpponentBeliefs, dominantOpponentStyle, evaluateRoster, normalizeLeagueSettings, runMonteCarloRestOfDraft, updateOpponentBelief } from "../draft-intelligence.js";
-import { historicalCalibration, settingsFingerprint, validateExternalGradeResponse } from "../draft-audit.js";
+import { historicalCalibration, settingsFingerprint } from "../draft-audit.js";
+import { applyProviderProjections, DEFAULT_LEARNING_PROFILE, providerRosterGrades, updateLearningFromDraft } from "../provider-intelligence.js";
+import { normalizeFantasyProsProjection, normalizeSportsDataProjection } from "../provider-normalization.js";
 
 const ranks = replacementRanks(10, 15);
 assert.deepEqual(ranks, { QB: 12, RB: 32, WR: 35, TE: 13, K: 10, DST: 10 });
@@ -99,10 +101,22 @@ assert.ok(Number.isFinite(mc["mc-0"].expectedWeekly), "Monte Carlo must return a
 assert.ok(mc["mc-0"].survival["mc-1"] >= 0 && mc["mc-0"].survival["mc-1"] <= 1, "next-turn survival must be calibrated as a probability");
 
 const auditSettings = normalizeLeagueSettings({ teams: 4, rounds: 5, rosterSlots: { QB: 1, RB: 1, WR: 1, TE: 0, FLEX: 1, SUPERFLEX: 0, K: 0, DST: 0 } });
-const external = validateExternalGradeResponse({ provider: "Independent projections", modelVersion: "1", gradedAt: "2026-08-31T00:00:00Z", methodology: "Separate PPR model", teams: Array.from({ length: 4 }, (_, team) => ({ team, score: 80 - team * 5, grade: ["A", "B+", "B", "C+"][team], confidence: .8, explanation: ["Deterministic projection score"] })) }, 4);
-assert.equal(external.teams.length, 4, "external graders must return one valid grade per team");
-assert.throws(() => validateExternalGradeResponse({ provider: "test", modelVersion: "1", methodology: "test", teams: [{ team: 0, score: 140 }] }, 1), /0 to 100/, "out-of-range external scores must be rejected");
-assert.throws(() => validateExternalGradeResponse({ teams: [{ team: 0, score: 80 }] }, 1), /provider, model version, and methodology/, "anonymous external grades must be rejected");
+const providerPlayers = Array.from({ length: 24 }, (_, index) => ({ id: `provider-${index}`, name: `Provider ${index}`, position: ["QB", "RB", "WR", "TE"][index % 4], projection: 180 + index, standardDeviation: 12 }));
+const providerSnapshot = { generatedAt: new Date().toISOString(), providers: { fantasypros: { status: "usable", matches: 100 }, sportsdataio: { status: "usable", matches: 100 } }, players: Object.fromEntries(providerPlayers.map((player, index) => [player.id, { fantasypros: { projection: 200 + index * 2 }, sportsdataio: { projection: 190 + index * 1.5 } }])) };
+const providerApplied = applyProviderProjections(providerPlayers, providerSnapshot, DEFAULT_LEARNING_PROFILE);
+assert.equal(providerApplied.usableProviders.length, 2, "both independent providers should participate when their snapshots are usable");
+assert.ok(providerPlayers.every((player) => player.modelSource === "multi-provider" && Number.isFinite(player.providerProjection)), "provider projections must be normalized into the player model");
+const providerRosters = Array.from({ length: 4 }, (_, team) => providerPlayers.slice(team * 5, team * 5 + 5));
+assert.equal(providerRosterGrades(providerRosters, auditSettings, "consensus").length, 4, "provider grading must return every team without an external language model");
+const learningPicks = providerPlayers.slice(0, 20).map((player, index) => ({ playerId: player.id, team: index % 4, index }));
+const learned = updateLearningFromDraft(DEFAULT_LEARNING_PROFILE, { draftId: "learning-1", picks: learningPicks, players: providerPlayers, userSlot: 0, teams: 4 });
+assert.equal(learned.updated, true, "a completed draft with dual-provider coverage should produce one bounded learning update");
+assert.ok(learned.profile.providerInfluence >= .35 && learned.profile.providerInfluence <= .75, "online learning must remain inside the safety bounds");
+assert.equal(updateLearningFromDraft(learned.profile, { draftId: "learning-1", picks: learningPicks, players: providerPlayers, userSlot: 0, teams: 4 }).updated, false, "the same draft must never train twice");
+assert.equal(normalizeFantasyProsProjection({ position_id: "RB", stats: [{ points_ppr: 287.4 }] }).projection, 287.4, "FantasyPros PPR response shapes must normalize deterministically");
+assert.equal(normalizeFantasyProsProjection({ position_id: "RB", stats: [{ points_ppr: 280 }, { points_ppr: 300 }] }).projection, 290, "multiple FantasyPros projection rows must be averaged rather than arbitrarily selecting one");
+assert.equal(normalizeSportsDataProjection({ Position: "WR", FantasyPointsPPR: 301.2, AverageDraftPositionPPR: 14.5 }).adp, 14.5, "SportsDataIO PPR ADP must be retained");
+assert.equal(normalizeSportsDataProjection({ Position: "QB", FantasyPointsPPR: 9999 }).projection, null, "scrambled or implausible provider projections must be rejected");
 const auditFingerprint = settingsFingerprint(auditSettings);
 const calibration = historicalCalibration(120, [{ id: "old-1", status: "complete", settingsFingerprint: auditFingerprint, userScore: 100 }, { id: "old-2", status: "complete", settingsFingerprint: auditFingerprint, userScore: 110 }], auditSettings, "current");
 assert.equal(calibration.percentile, 1, "past grades should calibrate current results only against matching completed rooms");

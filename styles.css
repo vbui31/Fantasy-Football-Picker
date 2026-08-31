@@ -196,6 +196,7 @@ dialog::backdrop { background: rgba(24, 15, 32, .62); backdrop-filter: blur(3px)
 .import-heading a { color: var(--purple); font-size: 10px; font-weight: 750; }
 .projection-import p { margin: 9px 0 13px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .grader-config p { margin: 5px 0 12px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.grader-config a { color: var(--purple); font-weight: 800; }
 .grader-config label { display: grid; gap: 5px; margin-top: 10px; color: var(--muted); font-size: 10px; font-weight: 700; }
 .grader-config small { display: block; margin-top: 10px; color: var(--muted); font: 600 9px/1.4 var(--mono); }
 .projection-import code { color: var(--ink); font: 600 10px/1 var(--mono); }

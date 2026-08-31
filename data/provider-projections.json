@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": null,
+  "season": 2026,
+  "providers": {
+    "fantasypros": { "status": "not-configured", "records": 0, "matches": 0 },
+    "sportsdataio": { "status": "not-configured", "records": 0, "matches": 0 }
+  },
+  "players": {}
+}

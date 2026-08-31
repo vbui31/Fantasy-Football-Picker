@@ -129,11 +129,9 @@
         <button class="text-button" id="clearModelButton" type="button">Restore Registry Estimates</button>
       </fieldset>
       <fieldset class="grader-config">
-        <legend>Independent draft grader</legend>
-        <p>Connect an HTTPS endpoint that follows the repository's external-grader contract. The independent score is shown beside—not substituted for—the local grade.</p>
-        <label>Endpoint URL<input id="graderEndpoint" type="url" inputmode="url" placeholder="https://grader.example.com/v1/grade"></label>
-        <label>Bearer token (session only)<input id="graderToken" type="password" autocomplete="off" placeholder="Optional"></label>
-        <small id="graderConfigStatus">No external grader configured. API credentials are never saved in the draft report.</small>
+        <legend>Independent provider evidence</legend>
+        <p><a href="https://www.fantasypros.com/api-data/" target="_blank" rel="noopener noreferrer">FantasyPros</a> consensus projections and <a href="https://sportsdata.io/fantasy-sports-api" target="_blank" rel="noopener noreferrer">SportsDataIO</a> season projections are fetched securely during deployment. API keys remain in GitHub repository secrets and are never sent to the browser.</p>
+        <small>Provider availability, player coverage, grade disagreement, and learned influence appear in League Results.</small>
       </fieldset>
       <div class="dialog-actions"><button class="button button-quiet" value="cancel">Keep Current Draft</button><button class="button button-gold" id="newDraftButton" value="default">Start New Draft</button></div>
     </form>
@@ -143,8 +141,8 @@
     <div class="league-dialog-inner">
       <div class="dialog-heading"><div><p class="eyebrow">Draft Room Report</p><h2 id="leagueTitle">League Results</h2></div><button class="icon-button" id="closeLeagueButton" type="button" aria-label="Close league results">×</button></div>
       <p class="league-summary" id="leagueSummary">Team grades update after every pick.</p>
-      <div class="report-actions"><button class="button button-quiet" id="exportDraftButton" type="button">Export report</button><button class="button button-quiet" id="shareDraftButton" type="button">Copy share link</button><button class="button button-quiet" id="draftLogButton" type="button">Draft log</button><button class="button button-dark" id="externalGradeButton" type="button">Get independent grade</button><button class="button button-dark" id="runBacktestButton" type="button">Run draft backtest</button></div>
-      <div class="grader-audit" id="graderAudit" aria-live="polite"></div>
+      <div class="report-actions"><button class="button button-quiet" id="exportDraftButton" type="button">Export report</button><button class="button button-quiet" id="shareDraftButton" type="button">Copy share link</button><button class="button button-quiet" id="draftLogButton" type="button">Draft log</button><button class="button button-dark" id="runBacktestButton" type="button">Run draft backtest</button></div>
+      <div class="grader-audit" id="providerAudit" aria-live="polite"></div>
       <div class="league-grid" id="leagueGrid"></div>
       <div class="feedback-callout"><div><strong>See a Bad Pick?</strong><span>Share the round, roster context, and recommendation so the model can improve.</span></div><a class="button button-dark" href="https://github.com/vbui31/Fantasy-Football-Picker/issues/new?template=draft-feedback.yml" target="_blank" rel="noopener noreferrer">Send Feedback ↗</a></div>
     </div>
