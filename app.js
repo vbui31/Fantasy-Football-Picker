@@ -96,8 +96,8 @@ function recalculateModel() {
     : "No consensus file loaded.";
   elements.clearModelButton.hidden = !consensus;
   elements.methodology.textContent = consensus
-    ? `ffanalytics weighted consensus from ${state.model.fileName} supplies projections, ranges, expert ranks, ADP, auction values, and uncertainty. Dynamic replacement levels (${Object.entries(replacement).map(([position, rank]) => `${position}${rank}`).join(", ")}), probabilistic tiers, and next-turn availability are recalculated for this room.`
-    : `${dataset.methodology} Dynamic replacement levels, probabilistic tiers, and next-turn availability are recalculated for this ${state.settings.teams}-team room.`;
+    ? `ffanalytics weighted consensus from ${state.model.fileName} supplies projections, ranges, expert ranks, ADP, auction values, and uncertainty. Research-derived reliability, phase-aware floor/ceiling utility, dynamic replacement levels (${Object.entries(replacement).map(([position, rank]) => `${position}${rank}`).join(", ")}), roster feasibility, probabilistic tiers, and next-turn availability are recalculated for this room.`
+    : `${dataset.methodology} Research-derived reliability, rookie cold-start handling, roster feasibility, dynamic replacement levels, probabilistic tiers, and next-turn availability are recalculated for this ${state.settings.teams}-team room.`;
 }
 
 function draftedPlayersForTeam(team) {
@@ -115,7 +115,7 @@ function recommendations(team = pickContext().team) {
   const available = availablePlayers();
   const nextPickIndex = nextPickIndexForTeam(state.picks.length, team, state.settings.teams, state.settings.teams * state.settings.rounds);
   return available
-    .map((player) => ({ player, ...scoreCandidate(player, { roster, round: context.round, currentPickIndex: state.picks.length, nextPickIndex, availablePlayers: available, profile: OPPONENT_PROFILE }) }))
+    .map((player) => ({ player, ...scoreCandidate(player, { roster, round: context.round, currentPickIndex: state.picks.length, nextPickIndex, availablePlayers: available, profile: OPPONENT_PROFILE, totalRounds: state.settings.rounds }) }))
     .sort((a, b) => b.score - a.score || b.player.vbd - a.player.vbd || a.player.rank - b.player.rank);
 }
 
@@ -166,7 +166,7 @@ function renderBoard() {
   const roster = draftedPlayersForTeam(team);
   const available = availablePlayers();
   elements.playerRows.innerHTML = players.slice(0, 50).map((player) => {
-    const decision = scoreCandidate(player, { roster, round: context.round, currentPickIndex: state.picks.length, nextPickIndex, availablePlayers: available, profile: OPPONENT_PROFILE });
+    const decision = scoreCandidate(player, { roster, round: context.round, currentPickIndex: state.picks.length, nextPickIndex, availablePlayers: available, profile: OPPONENT_PROFILE, totalRounds: state.settings.rounds });
     const signal = player.injury || `T${player.tier} · ${decision.hasNextPick ? `${Math.round(decision.availability * 100)}% next` : "final turn"}`;
     const lowRisk = Number.isFinite(player.uncertainty) && player.uncertainty <= (player.uncertainty <= 1 ? .33 : 33);
     return `<tr>
@@ -223,8 +223,8 @@ function renderRecommendation() {
     <div class="rec-topline"><span class="pos-badge pos-${best.position}">${best.position}</span><span class="rec-rank">BOARD #${best.rank}</span></div>
     <h2 id="recommendationTitle">${escapeHtml(best.name)}</h2>
     <div class="rec-meta">${best.team} · ${consensusMeta}</div>
-    <p class="rec-reason">Best combined value, roster fit, tier urgency, and likelihood of disappearing before your next turn.</p>
-    <div class="rec-metrics"><div><span>Est. points</span><strong>${best.projection.toFixed(1)}</strong></div><div><span>Dynamic VBD</span><strong>${best.vbd > 0 ? "+" : ""}${best.vbd.toFixed(1)}</strong></div><div><span>Tier confidence</span><strong>T${best.tier} · ${Math.round(best.tierProbability * 100)}%</strong></div><div><span>Chance at next pick</span><strong>${bestPick.hasNextPick ? `${Math.round(bestPick.availability * 100)}%` : "No next turn"}</strong></div></div>
+    <p class="rec-reason">Best research-adjusted combination of value, ${bestPick.phase.toLowerCase()} utility, roster feasibility, tier urgency, and wait risk.</p>
+    <div class="rec-metrics"><div><span>Est. points</span><strong>${best.projection.toFixed(1)}</strong></div><div><span>Dynamic VBD</span><strong>${best.vbd > 0 ? "+" : ""}${best.vbd.toFixed(1)}</strong></div><div><span>Reliability</span><strong>${Math.round(bestPick.reliability * 100)}%</strong></div><div><span>Chance at next pick</span><strong>${bestPick.hasNextPick ? `${Math.round(bestPick.availability * 100)}%` : "No next turn"}</strong></div></div>
     <div class="factor-heading">Why the model likes this pick</div><ul class="factor-list">${factorRows}</ul>
     <button class="button button-gold" type="button" data-draft="${best.id}">Draft ${escapeHtml(best.lastName || best.name)}</button>`;
   elements.alternatives.innerHTML = picks.slice(1, 4).map(({ player }, index) => `<div class="alternative"><em>0${index + 2}</em><strong>${escapeHtml(player.name)}</strong><span class="pos-badge pos-${player.position}">${player.position}</span></div>`).join("");

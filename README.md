@@ -80,3 +80,15 @@ The picker incorporates the useful concepts from [cbratkovics/fantasy-football-a
 - every recommendation exposes its highest-impact factors in the UI.
 
 The calculation lives in `draft-model.js` and produces browser-safe numbers only. It is a decision layer over the current projections, not a claim that registry estimates are a trained forecasting model.
+
+## Research-derived decision utility
+
+Three supplied academic papers now inform the recommendation layer. The implementation uses the parts that transfer cleanly to a season-long snake draft:
+
+- projection reliability is estimated from consensus dispersion or floor/ceiling range, with explicit injury and rookie cold-start adjustments;
+- foundation rounds favor dependable floors, middle rounds balance outcomes, and late rounds put more weight on ceilings;
+- roster construction is treated as a constrained optimization problem, so late picks cannot make a complete starting lineup mathematically impossible;
+- the app keeps prediction quality separate from draft utility, because lower forecast error did not always produce the strongest constrained teams in the cited experiments;
+- future trained projection work should use position-specific models and chronological holdouts rather than random train/test leakage.
+
+The full translation, limitations, and source bibliography are documented in [`docs/research-methodology.md`](docs/research-methodology.md). The PDFs themselves are not redistributed.

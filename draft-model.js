@@ -120,8 +120,50 @@ export function availabilityAtNextPick(player, currentPickIndex, nextPickIndex) 
 
 function uncertaintyRatio(player) {
   if (Number.isFinite(player.uncertainty)) return clamp(player.uncertainty <= 1 ? player.uncertainty : player.uncertainty / 100, 0, 1);
+  if (Number.isFinite(player.standardDeviation) && player.projection > 0) return clamp(player.standardDeviation / player.projection, 0, 1);
   if (Number.isFinite(player.floor) && Number.isFinite(player.ceiling) && player.projection > 0) return clamp((player.ceiling - player.floor) / (2 * player.projection), 0, 1);
-  return 0;
+  return .22;
+}
+
+export function evidenceProfile(player, round = 0, totalRounds = 15) {
+  const uncertainty = uncertaintyRatio(player);
+  const rookie = player.yearsExperience === 0;
+  const consensus = player.modelSource === "ffanalytics";
+  const reliability = clamp(.83 - uncertainty * .85 - (player.injury ? .15 : 0) - (rookie ? .1 : 0) + (consensus ? .04 : 0), .1, .95);
+  const estimatedSpread = player.projection * uncertainty;
+  const floor = Number.isFinite(player.floor) ? player.floor : player.projection - estimatedSpread;
+  const ceiling = Number.isFinite(player.ceiling) ? player.ceiling : player.projection + estimatedSpread;
+  const progress = clamp((round + 1) / Math.max(1, totalRounds), 0, 1);
+  const phase = progress <= .4 ? "Foundation" : progress <= .72 ? "Balance" : "Upside";
+  const weights = phase === "Foundation"
+    ? { floor: .42, mean: .53, ceiling: .05 }
+    : phase === "Balance"
+      ? { floor: .2, mean: .6, ceiling: .2 }
+      : { floor: .08, mean: .47, ceiling: .45 };
+  const utilityProjection = floor * weights.floor + player.projection * weights.mean + ceiling * weights.ceiling;
+  const reliabilityWeight = phase === "Foundation" ? 18 : phase === "Balance" ? 10 : 4;
+  const impact = (utilityProjection - player.projection) * .12 + (reliability - .5) * reliabilityWeight;
+  return { uncertainty, reliability, floor, ceiling, phase, utilityProjection, impact, rookie };
+}
+
+const REQUIRED_STARTERS = { QB: 1, RB: 2, WR: 2, TE: 1, K: 1, DST: 1 };
+
+export function missingStarterSlots(counts) {
+  const missingBase = Object.entries(REQUIRED_STARTERS).reduce((total, [position, required]) => total + Math.max(0, required - (counts[position] || 0)), 0);
+  const baseSkillFilled = Math.min(counts.RB || 0, 2) + Math.min(counts.WR || 0, 2) + Math.min(counts.TE || 0, 1);
+  const extraSkill = Math.max(0, (counts.RB || 0) + (counts.WR || 0) + (counts.TE || 0) - baseSkillFilled);
+  return missingBase + Math.max(0, 2 - extraSkill);
+}
+
+function constraintFit(player, counts, rosterSize, totalRounds) {
+  const before = missingStarterSlots(counts);
+  const afterCounts = { ...counts, [player.position]: (counts[player.position] || 0) + 1 };
+  const after = missingStarterSlots(afterCounts);
+  const picksAfterThis = Math.max(0, totalRounds - rosterSize - 1);
+  if (after > picksAfterThis) return { impact: -1000, detail: "This pick would make a complete legal starting lineup impossible." };
+  if (before > after && after === picksAfterThis) return { impact: 48, detail: "Roster math requires this position now to preserve a legal lineup." };
+  if (before > after && before >= picksAfterThis) return { impact: 20, detail: "Closes a required starter slot before the remaining picks become constrained." };
+  return { impact: 0, detail: "The roster remains feasible after this selection." };
 }
 
 function rosterFit(player, counts, round, profile) {
@@ -154,29 +196,33 @@ function rosterFit(player, counts, round, profile) {
   return { impact, detail };
 }
 
-export function scoreCandidate(player, { roster, round, currentPickIndex, nextPickIndex, availablePlayers, profile }) {
+export function scoreCandidate(player, { roster, round, currentPickIndex, nextPickIndex, availablePlayers, profile, totalRounds = 15 }) {
   const counts = roster.reduce((result, rosterPlayer) => {
     result[rosterPlayer.position] = (result[rosterPlayer.position] || 0) + 1;
     return result;
   }, {});
   const fit = rosterFit(player, counts, round, profile);
+  const constraint = constraintFit(player, counts, roster.length, totalRounds);
+  const evidence = evidenceProfile(player, round, totalRounds);
   const availability = availabilityAtNextPick(player, currentPickIndex, nextPickIndex);
   const tierRemaining = availablePlayers.filter((candidate) => candidate.position === player.position && candidate.tier === player.tier).length;
   const tierImpact = Math.min(16, (player.tierDropoff || 0) * .8) + (tierRemaining <= 2 ? 5 : 0);
   const hasNextPick = nextPickIndex !== null && nextPickIndex > currentPickIndex;
   const urgencyImpact = hasNextPick ? (1 - availability) * Math.min(30, 10 + Math.max(0, player.vbd) * .12) : 0;
-  const riskImpact = uncertaintyRatio(player) * -12 + (player.injury ? -8 : 0);
+  const riskImpact = (player.injury ? -8 : 0);
   const marketPick = Number.isFinite(player.adp) ? player.adp : Number.isFinite(player.expertRank) ? player.expertRank : player.sourceRank;
   const reach = Number.isFinite(marketPick) ? marketPick - (currentPickIndex + 1) : 0;
   const marketImpact = reach > 14 ? -Math.min(14, (reach - 14) * .16) : reach < 2 ? 3 : 0;
-  const score = player.vbd + fit.impact + tierImpact + urgencyImpact + riskImpact + marketImpact;
+  const score = player.vbd + fit.impact + constraint.impact + evidence.impact + tierImpact + urgencyImpact + riskImpact + marketImpact;
   const factors = [
     { label: "Value", impact: player.vbd, detail: `${player.vbd >= 0 ? "+" : ""}${player.vbd.toFixed(1)} points versus ${player.position}${player.replacementRank}.` },
     { label: "Roster fit", impact: fit.impact, detail: fit.detail },
+    { label: `${evidence.phase} utility`, impact: evidence.impact, detail: `${Math.round(evidence.reliability * 100)}% evidence reliability${evidence.rookie ? " after a rookie cold-start adjustment" : ""}; this phase weights ${evidence.phase === "Foundation" ? "floor" : evidence.phase === "Upside" ? "ceiling" : "balanced outcomes"}.` },
     { label: "Tier", impact: tierImpact, detail: `${tierRemaining} player${tierRemaining === 1 ? "" : "s"} left in Tier ${player.tier}; next tier drops ${round1(player.tierDropoff || 0).toFixed(1)} points.` },
     { label: "Wait risk", impact: urgencyImpact, detail: hasNextPick ? `${Math.round(availability * 100)}% estimated chance to reach the next pick.` : "Final selection; there is no later turn to preserve value for." }
   ];
-  if (riskImpact) factors.push({ label: "Risk", impact: riskImpact, detail: player.injury ? `${player.injury} designation and projection uncertainty reduce the score.` : "Projection range reduces the certainty-adjusted score." });
+  if (constraint.impact) factors.push({ label: "Lineup constraint", impact: constraint.impact, detail: constraint.detail });
+  if (riskImpact) factors.push({ label: "Availability", impact: riskImpact, detail: `${player.injury} designation reduces the score.` });
   if (marketImpact < 0) factors.push({ label: "Reach", impact: marketImpact, detail: "Market position suggests a later selection may be possible." });
-  return { score, availability, hasNextPick, tierRemaining, factors: factors.sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact)) };
+  return { score, availability, hasNextPick, tierRemaining, reliability: evidence.reliability, phase: evidence.phase, utilityProjection: evidence.utilityProjection, factors: factors.sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact)) };
 }
