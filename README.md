@@ -67,7 +67,7 @@ The browser app is static and has no runtime dependencies. Draft state is stored
 
 ## Daily player context
 
-The committed `data/live-player-context.json` snapshot enriches the board with current Sleeper roster status, injuries, practice participation, depth chart, news-update timestamps, and 24-hour add/drop activity. Prior completed-season player statistics come from nflverse and are used only as a bounded historical cross-check. The site disables availability overrides when a snapshot is more than 48 hours old.
+The committed `data/live-player-context.json` snapshot enriches the board with current Sleeper roster status, injuries, practice participation, depth chart, news-update timestamps, and 24-hour add/drop activity. The updater calls Sleeper's active, position-filtered player endpoint for QB, RB, WR, TE, K, and DEF, then joins the 24-hour trending add and drop endpoints by Sleeper player ID. Prior completed-season player statistics come from nflverse and are used only as a bounded historical cross-check. The site disables availability overrides when a snapshot is more than 48 hours old.
 
 Refresh it locally with:
 
@@ -75,7 +75,7 @@ Refresh it locally with:
 npm run refresh:live
 ```
 
-Sleeper asks clients to download its full NFL player map no more than once per day, so the updater keeps a 20-hour cache unless `--force` is supplied. GitHub Pages refreshes the deployed snapshot every day. The integration does not claim to provide live game scoring or licensed news text; `newsUpdated` is a timestamp only.
+Sleeper asks clients to download player maps no more than once per day, so the updater keeps a 20-hour cache unless `--force` is supplied. The position filters keep each response smaller than the full player map. GitHub Pages refreshes the deployed snapshot every day. The integration does not claim to provide live game scoring or licensed news text; `newsUpdated` is a timestamp only.
 
 ## Mock-draft training
 

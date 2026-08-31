@@ -28,12 +28,15 @@ async function fetchText(url) {
 }
 
 const sleeperBase = "https://api.sleeper.app/v1";
-const [state, sleeperPlayers, trendingAdds, trendingDrops] = await Promise.all([
+const sleeperPositions = ["QB", "RB", "WR", "TE", "K", "DEF"];
+const [state, sleeperPositionMaps, trendingAdds, trendingDrops] = await Promise.all([
   fetchJson(`${sleeperBase}/state/nfl`),
-  fetchJson(`${sleeperBase}/players/nfl?active=true`),
+  Promise.all(sleeperPositions.map((position) => fetchJson(`${sleeperBase}/players/nfl?position=${position}&active=true`))),
   fetchJson(`${sleeperBase}/players/nfl/trending/add?lookback_hours=24&limit=200`),
   fetchJson(`${sleeperBase}/players/nfl/trending/drop?lookback_hours=24&limit=200`)
 ]);
+const sleeperPlayers = Object.assign({}, ...sleeperPositionMaps);
+const positionRecords = Object.fromEntries(sleeperPositions.map((position, index) => [position, Object.keys(sleeperPositionMaps[index]).length]));
 
 const statsSeason = Number(state.previous_season || Number(state.season) - 1);
 const statsUrl = `https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_reg_${statsSeason}.csv`;
@@ -97,7 +100,7 @@ const context = {
   generatedAt: new Date().toISOString(),
   season: { season: number(state.season), week: number(state.week), seasonType: state.season_type || null, statsSeason },
   sources: [
-    { name: "Sleeper NFL API", url: "https://docs.sleeper.com/", kind: "daily player metadata and 24-hour add/drop trends", cadence: "daily" },
+    { name: "Sleeper NFL API", url: "https://docs.sleeper.com/#players", kind: "daily active position-filtered player metadata and 24-hour add/drop trends", cadence: "daily", positions: sleeperPositions },
     { name: "nflverse player stats", url: "https://github.com/nflverse/nflverse-data/releases/tag/stats_player", kind: "prior completed regular-season statistics", cadence: "release-driven" }
   ],
   quality: {
@@ -108,9 +111,10 @@ const context = {
     statsCoverage: Number((statsMatched / registryPlayers).toFixed(4)),
     withAvailability,
     withNewsTimestamp,
+    positionRecords,
     status: sleeperMatched / registryPlayers >= .8 ? "usable" : "degraded",
     limitations: [
-      "Sleeper requests that the full NFL player map be fetched no more than once per day; this script caches for 20 hours.",
+      "Sleeper requests that player maps be fetched no more than once per day; this script uses smaller active position subsets and caches for 20 hours.",
       "newsUpdated is a metadata timestamp, not licensed headline text or sentiment.",
       "nflverse statistics are historical context and are not a real-time scoring feed.",
       "Rookies and players without a GSIS identifier will not have prior-season statistics."

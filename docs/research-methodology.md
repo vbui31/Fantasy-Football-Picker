@@ -44,7 +44,7 @@ Quality gates and limits are explicit:
 
 - at least 80% of the bundled registry must match Sleeper or the updater fails;
 - availability overrides expire after 48 hours;
-- Sleeper's player-map download is cached for 20 hours to respect its once-daily guidance;
+- Sleeper's active QB/RB/WR/TE/K/DEF player-map subsets are cached for 20 hours to respect its once-daily guidance and avoid the full 5 MB response;
 - nflverse history is not a live scoring feed and will be missing for rookies and some inactive players;
 - `newsUpdated` proves only that source metadata changed; no headline content or sentiment is inferred.
 
