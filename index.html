@@ -53,7 +53,10 @@
             <input id="searchInput" name="player-search" type="search" placeholder="Search player or team…" autocomplete="off" aria-label="Search players">
           </label>
           <div class="position-filters" id="positionFilters" aria-label="Filter by position"></div>
+          <button class="button button-quiet compare-launch" id="compareButton" type="button" disabled>Compare <span id="compareCount">0</span></button>
         </div>
+
+        <div class="scarcity-panel" id="scarcityPanel" aria-label="Position scarcity"></div>
 
         <div class="table-wrap">
           <table class="player-table">
@@ -93,9 +96,27 @@
   <dialog id="setupDialog" aria-labelledby="setupTitle">
     <form method="dialog" id="setupForm">
       <div class="dialog-heading"><div><p class="eyebrow">League configuration</p><h2 id="setupTitle">Set the draft room</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+      <fieldset class="league-import">
+        <legend>Sleeper league</legend>
+        <div class="inline-import"><input id="sleeperLeagueId" name="sleeper-league-id" inputmode="numeric" placeholder="League ID"><button class="button button-dark" id="importSleeperButton" type="button">Import</button></div>
+        <p id="sleeperImportStatus">Import teams, roster slots, scoring metadata, keepers, and traded picks from a public Sleeper league.</p>
+      </fieldset>
+      <label>Draft plan<select id="draftPreset" name="draft-preset"><option value="balanced">Balanced value</option><option value="hero-rb">Hero RB</option><option value="wr-core">WR core</option><option value="robust-rb">Robust RB</option><option value="elite-te">Elite TE</option><option value="late-qb">Late QB</option></select></label>
+      <label>Format<select id="draftFormat" name="draft-format"><option value="snake">Snake draft</option><option value="auction">Auction value simulation</option></select></label>
+      <label>Scoring<select id="scoringFormat" name="scoring-format" disabled><option value="ppr">PPR · 1 point per reception</option></select></label>
       <label>Teams<select id="teamCount" name="teams"><option>8</option><option selected>10</option><option>12</option><option>14</option></select></label>
       <label>Your draft slot<select id="userSlot" name="user-slot"></select></label>
       <label>Rounds<select id="roundCount" name="rounds"><option>12</option><option selected>15</option><option>16</option><option>18</option></select></label>
+      <fieldset class="roster-config">
+        <legend>Starting roster</legend>
+        <div class="slot-grid">
+          <label>QB<input id="slotQB" type="number" min="0" max="4" value="1"></label><label>RB<input id="slotRB" type="number" min="0" max="6" value="2"></label><label>WR<input id="slotWR" type="number" min="0" max="8" value="2"></label><label>TE<input id="slotTE" type="number" min="0" max="4" value="1"></label><label>FLEX<input id="slotFlex" type="number" min="0" max="5" value="2"></label><label>SUPERFLEX<input id="slotSuperflex" type="number" min="0" max="3" value="0"></label><label>K<input id="slotK" type="number" min="0" max="2" value="1"></label><label>DST<input id="slotDST" type="number" min="0" max="2" value="1"></label>
+        </div>
+      </fieldset>
+      <label>TE premium<select id="tePremium" name="te-premium"><option value="0">None</option><option value="0.5">+0.5 per TE reception</option><option value="1">+1 per TE reception</option></select></label>
+      <label>Auction budget<input id="auctionBudget" type="number" min="50" max="1000" value="200"></label>
+      <label>Manual keepers<textarea id="keepersInput" rows="3" placeholder="Team 1: Player Name&#10;Team 4: Player Name"></textarea></label>
+      <label>Traded picks<textarea id="tradedPicksInput" rows="3" placeholder="12: Team 3&#10;31: Team 8"></textarea></label>
       <label>Simulation pace<select id="simulationPace" name="simulation-pace"><option value="0">Instant</option><option value="220" selected>Fast · 0.2 seconds</option><option value="650">Live · 0.7 seconds</option></select></label>
       <label class="check-row"><input type="checkbox" id="autoOpponents" name="auto-opponents" checked><span><strong>Auto-Pick Opponents</strong><small>Advance the room back to your next selection.</small></span></label>
       <fieldset class="projection-import">
@@ -115,8 +136,16 @@
     <div class="league-dialog-inner">
       <div class="dialog-heading"><div><p class="eyebrow">Draft Room Report</p><h2 id="leagueTitle">League Results</h2></div><button class="icon-button" id="closeLeagueButton" type="button" aria-label="Close league results">×</button></div>
       <p class="league-summary" id="leagueSummary">Team grades update after every pick.</p>
+      <div class="report-actions"><button class="button button-quiet" id="exportDraftButton" type="button">Export report</button><button class="button button-quiet" id="shareDraftButton" type="button">Copy share link</button><button class="button button-dark" id="runBacktestButton" type="button">Run draft backtest</button></div>
       <div class="league-grid" id="leagueGrid"></div>
       <div class="feedback-callout"><div><strong>See a Bad Pick?</strong><span>Share the round, roster context, and recommendation so the model can improve.</span></div><a class="button button-dark" href="https://github.com/vbui31/Fantasy-Football-Picker/issues/new?template=draft-feedback.yml" target="_blank" rel="noopener noreferrer">Send Feedback ↗</a></div>
+    </div>
+  </dialog>
+
+  <dialog id="compareDialog" class="compare-dialog" aria-labelledby="compareTitle">
+    <div class="compare-dialog-inner">
+      <div class="dialog-heading"><div><p class="eyebrow">Decision lab</p><h2 id="compareTitle">Player comparison</h2></div><button class="icon-button" id="closeCompareButton" type="button" aria-label="Close comparison">×</button></div>
+      <div id="compareContent"></div>
     </div>
   </dialog>
 

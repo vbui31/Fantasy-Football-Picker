@@ -1,10 +1,30 @@
 # War Room Fantasy Draft Picker
 
-A dependency-free, browser-based snake draft assistant built from the supplied NFL player registry. It combines a searchable player board, value-based recommendations, roster construction signals, simulated opponent picks, undo, and automatic local saving.
+A dependency-free, browser-based PPR draft assistant built from the supplied NFL player registry. It combines a searchable player board, Monte Carlo rest-of-draft recommendations, adaptive opponents, configurable league intelligence, advanced roster grading, snake/auction simulations, and automatic local saving.
 
 **Live site:** [vbui31.github.io/Fantasy-Football-Picker](https://vbui31.github.io/Fantasy-Football-Picker/)
 
-The simulator supports animated opponent picks, run-to-your-pick mode, full-draft simulation with pause/resume, league-wide roster grades, six distinct opponent strategy archetypes, and draft state saved in the browser.
+The production scoring contract is full PPR. The simulator supports animated opponent picks, run-to-your-pick mode, full-draft simulation with pause/resume, league-wide roster grades, adaptive mixtures of six opponent archetypes, and draft state saved in the browser.
+
+## PPR Monte Carlo decision engine
+
+The top three legal recommendations are evaluated across 16 stochastic rest-of-draft paths. Each path completes the room with position-aware opponents, roster constraints, tier value, learned strategy probabilities, and controlled random variation. The recommendation card reports expected weekly PPR starter output, expected matchup win rate, an 80% lineup range, and player-specific survival probabilities at the user's next turn.
+
+The simulation is a decision aid, not a guarantee. Repeated rooms receive different controlled seeds, while a room remains reproducible through its stored state.
+
+## League intelligence
+
+Draft Setup supports:
+
+- public Sleeper league import for team count, roster slots, scoring metadata, keepers, and traded picks;
+- manual QB/RB/WR/TE/FLEX/SUPERFLEX/K/DST configuration;
+- PPR scoring locked at one point per reception for the current production version;
+- optional TE-premium and superflex positional adjustments;
+- manual keepers and traded-pick ownership;
+- snake drafts and a budget-aware auction value simulation;
+- Balanced, Hero RB, WR Core, Robust RB, Elite TE, and Late QB plans.
+
+Replacement levels and roster targets are recalculated for every room. Keepers consume their team's final natural selections, and traded-pick ownership changes the appropriate selection on the clock.
 
 ## Feedback
 
@@ -67,7 +87,7 @@ The browser app is static and has no runtime dependencies. Draft state is stored
 
 ## Daily player context
 
-The committed `data/live-player-context.json` snapshot enriches the board with current Sleeper roster status, injuries, practice participation, depth chart, news-update timestamps, and 24-hour add/drop activity. The updater calls Sleeper's active, position-filtered player endpoint for QB, RB, WR, TE, K, and DEF, then joins the 24-hour trending add and drop endpoints by Sleeper player ID. Prior completed-season player statistics come from nflverse and are used only as a bounded historical cross-check. The site disables availability overrides when a snapshot is more than 48 hours old.
+The committed `data/live-player-context.json` snapshot enriches the board with current Sleeper roster status, injuries, practice participation, depth chart, news-update timestamps, and 24-hour add/drop activity. The updater calls Sleeper's active, position-filtered player endpoint for QB, RB, WR, TE, K, and DEF, then joins the 24-hour trending add and drop endpoints by Sleeper player ID. Prior completed-season player statistics come from nflverse and are used only as a bounded historical cross-check. The nflverse schedule release supplies real team bye weeks for conflict grading. The site disables availability overrides when a snapshot is more than 48 hours old.
 
 Refresh it locally with:
 
@@ -81,6 +101,8 @@ Sleeper asks clients to download player maps no more than once per day, so the u
 
 Opponent timing and roster targets use derived calibration constants from prior mock-draft observations. The room rotates Adaptive Value, Hero RB, WR Core, Robust RB, Elite TE, and Late QB profiles, each with soft biases rather than hard scripts. The published calibration delays QB/TE backups and special teams, recognizes tier runs without blindly chasing them, and produces more realistic RB/WR depth.
 
+Every opponent now begins with a probability distribution over those profiles. Each observed pick updates the distribution and behavioral summaries for reach frequency, positional-run following, and ignored roster needs. Results display the dominant inferred style and its confidence instead of treating teams as permanently fixed archetypes.
+
 ## Decision model
 
 The picker incorporates the useful concepts from [cbratkovics/fantasy-football-ai](https://github.com/cbratkovics/fantasy-football-ai) without loading its executable pickle artifacts or placeholder prediction API:
@@ -92,6 +114,18 @@ The picker incorporates the useful concepts from [cbratkovics/fantasy-football-a
 - every recommendation exposes its highest-impact factors in the UI.
 
 The calculation lives in `draft-model.js` and produces browser-safe numbers only. It is a decision layer over the current projections, not a claim that registry estimates are a trained forecasting model.
+
+## Grading, backtesting, and learning
+
+Roster grades now compare projected weekly starters, bench VBD, floor/ceiling range, known bye conflicts, injury concentration, QB/pass-catcher correlation, team concentration, positional advantage, and pairwise expected wins. Every league-results card explains the largest components.
+
+The in-app historical evaluation joins completed rosters to bundled prior-season outcomes and reports coverage, recommendation regret, projection MAE, legal-lineup rate, playoff probability, and championship probability by draft slot. It is explicitly labeled exploratory until matching archived draft-time projection and ADP snapshots are provided; future information must never be promoted into production weights.
+
+The repository includes `.codex/skills/fantasy-draft-learning`, a validated skill that defines chronological evaluation, minimum sample sizes, segmentation, and model-promotion gates. It allows room-specific opponent beliefs to adapt immediately while preventing small mock samples from silently rewriting global strategy weights.
+
+## Decision lab and sharing
+
+The interface includes two-player comparison, what-if roster scoring, position scarcity bars, next-turn survival visualization, draft presets, mobile layouts, recommendation feedback controls, shareable room configuration links, and downloadable JSON draft reports.
 
 ## Research-derived decision utility
 

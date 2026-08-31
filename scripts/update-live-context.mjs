@@ -29,11 +29,13 @@ async function fetchText(url) {
 
 const sleeperBase = "https://api.sleeper.app/v1";
 const sleeperPositions = ["QB", "RB", "WR", "TE", "K", "DEF"];
-const [state, sleeperPositionMaps, trendingAdds, trendingDrops] = await Promise.all([
+const scheduleUrl = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv";
+const [state, sleeperPositionMaps, trendingAdds, trendingDrops, scheduleText] = await Promise.all([
   fetchJson(`${sleeperBase}/state/nfl`),
   Promise.all(sleeperPositions.map((position) => fetchJson(`${sleeperBase}/players/nfl?position=${position}&active=true`))),
   fetchJson(`${sleeperBase}/players/nfl/trending/add?lookback_hours=24&limit=200`),
-  fetchJson(`${sleeperBase}/players/nfl/trending/drop?lookback_hours=24&limit=200`)
+  fetchJson(`${sleeperBase}/players/nfl/trending/drop?lookback_hours=24&limit=200`),
+  fetchText(scheduleUrl)
 ]);
 const sleeperPlayers = Object.assign({}, ...sleeperPositionMaps);
 const positionRecords = Object.fromEntries(sleeperPositions.map((position, index) => [position, Object.keys(sleeperPositionMaps[index]).length]));
@@ -41,6 +43,15 @@ const positionRecords = Object.fromEntries(sleeperPositions.map((position, index
 const statsSeason = Number(state.previous_season || Number(state.season) - 1);
 const statsUrl = `https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_reg_${statsSeason}.csv`;
 const statsRows = parseCsv(await fetchText(statsUrl));
+const scheduleRows = parseCsv(scheduleText).filter((row) => Number(row.season) === Number(state.season) && (row.game_type || row.season_type || "REG") === "REG");
+const scheduledWeeksByTeam = new Map();
+for (const game of scheduleRows) {
+  for (const team of [game.home_team, game.away_team].filter(Boolean)) {
+    if (!scheduledWeeksByTeam.has(team)) scheduledWeeksByTeam.set(team, new Set());
+    scheduledWeeksByTeam.get(team).add(Number(game.week));
+  }
+}
+const byeWeeks = Object.fromEntries([...scheduledWeeksByTeam].map(([team, weeks]) => [team, Array.from({ length: 18 }, (_, index) => index + 1).find((week) => !weeks.has(week)) || null]));
 const statsByGsis = new Map(statsRows.map((row) => [String(row.player_id || "").trim(), row]).filter(([id]) => id));
 const addsById = new Map(trendingAdds.map((entry) => [String(entry.player_id), Number(entry.count) || 0]));
 const dropsById = new Map(trendingDrops.map((entry) => [String(entry.player_id), Number(entry.count) || 0]));
@@ -73,6 +84,7 @@ for (const registryPlayer of registry.players) {
     practiceDescription: live.practice_description || null,
     depthChartOrder: number(live.depth_chart_order),
     depthChartPosition: live.depth_chart_position || null,
+    byeWeek: byeWeeks[live.team] || null,
     newsUpdated: number(live.news_updated),
     gsisId,
     trendingAdds: addsById.get(registryPlayer.id) || 0,
@@ -101,7 +113,8 @@ const context = {
   season: { season: number(state.season), week: number(state.week), seasonType: state.season_type || null, statsSeason },
   sources: [
     { name: "Sleeper NFL API", url: "https://docs.sleeper.com/#players", kind: "daily active position-filtered player metadata and 24-hour add/drop trends", cadence: "daily", positions: sleeperPositions },
-    { name: "nflverse player stats", url: "https://github.com/nflverse/nflverse-data/releases/tag/stats_player", kind: "prior completed regular-season statistics", cadence: "release-driven" }
+    { name: "nflverse player stats", url: "https://github.com/nflverse/nflverse-data/releases/tag/stats_player", kind: "prior completed regular-season statistics", cadence: "release-driven" },
+    { name: "nflverse schedules", url: scheduleUrl, kind: "current-season schedule used to derive bye weeks", cadence: "release-driven" }
   ],
   quality: {
     registryPlayers,
@@ -111,6 +124,7 @@ const context = {
     statsCoverage: Number((statsMatched / registryPlayers).toFixed(4)),
     withAvailability,
     withNewsTimestamp,
+    byeWeekTeams: Object.keys(byeWeeks).length,
     positionRecords,
     status: sleeperMatched / registryPlayers >= .8 ? "usable" : "degraded",
     limitations: [

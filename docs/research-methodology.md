@@ -36,6 +36,18 @@ The late-round utility now rewards ceiling range, rookie/youth uncertainty, and 
 
 Simulated teams are no longer noisy copies of one ranking. Six repeatable archetypes—Adaptive Value, Hero RB, WR Core, Robust RB, Elite TE, and Late QB—apply soft preferences over the shared value model. Recent position runs create limited urgency, reflecting the study's observed herding, but quarterbacks, kickers, and defenses cannot override the underlying draft-window discipline merely because other teams started a run. This yields varied but still defensible opponents.
 
+The production implementation treats these as latent strategies rather than permanent labels. Opponents start with uniform probabilities; every pick performs a bounded Bayesian-style likelihood update. Room-local observations can change the current simulation immediately, but the global model is promoted only through the repository's leakage-safe learning skill.
+
+### PPR Monte Carlo completion
+
+Recommendations are no longer judged only at the current pick. For each of the three strongest legal candidates, the browser completes 16 stochastic draft paths using league roster constraints, learned opponent mixtures, tier value, positional need, and controlled Gumbel variation. It compares the completed PPR roster on expected weekly starters, expected wins, downside, upside, and next-turn player survival. This is deliberately small enough to run during a live draft; it is not presented as a season forecast.
+
+### League configuration and grading
+
+Full PPR is the current production contract. Team count, roster slots, superflex demand, TE premium, keepers, traded picks, and snake/auction format adjust replacement ranks and position utility. Advanced grading optimizes a legal starting lineup, then measures weekly output, bench VBD, floor/ceiling range, real bye-week collisions, injury concentration, useful QB/pass-catcher stacks, excessive same-team concentration, positional advantage, and pairwise expected wins.
+
+Historical evaluation reports outcome coverage, position-matched recommendation regret, projection MAE, lineup feasibility, and playoff/title probabilities by slot. Results using the bundled prior-season outcomes remain exploratory until the corresponding archived preseason projections and ADP are supplied, preventing future-data leakage.
+
 ### Live metadata and data quality
 
 The daily snapshot uses Sleeper as the current identity/availability layer and nflverse as historical production context. Current injury, practice, roster, and depth-chart fields can materially lower a score; 24-hour add/drop activity is capped as a weak signal. Prior-season PPR pace is capped to a six-point adjustment so it can challenge an estimate without becoming a naive last-year-points ranking.
@@ -46,6 +58,7 @@ Quality gates and limits are explicit:
 - availability overrides expire after 48 hours;
 - Sleeper's active QB/RB/WR/TE/K/DEF player-map subsets are cached for 20 hours to respect its once-daily guidance and avoid the full 5 MB response;
 - nflverse history is not a live scoring feed and will be missing for rookies and some inactive players;
+- nflverse current-season schedules are used to derive bye weeks and are refreshed with the daily snapshot;
 - `newsUpdated` proves only that source metadata changed; no headline content or sentiment is inferred.
 
 ## What requires more data

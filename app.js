@@ -1,8 +1,8 @@
-import { enrichPlayerModel, nextPickIndexForTeam, opponentStrategyForTeam, opponentStrategyImpact, scoreCandidate } from "./draft-model.js";
-import { buildProjectionDataset, parseCsv } from "./ffanalytics-data.js";
+import { enrichPlayerModel, scoreCandidate } from "./draft-model.js";
+import { buildProjectionDataset, normalizedName, parseCsv } from "./ffanalytics-data.js";
+import { backtestCompletedDraft, createOpponentBeliefs, dominantOpponentStyle, evaluateRoster, expectedOpponentBias, normalizeLeagueSettings, runMonteCarloRestOfDraft, updateOpponentBelief } from "./draft-intelligence.js";
 
 const POSITIONS = ["ALL", "RB", "WR", "QB", "TE", "FLEX", "K", "DST"];
-const STARTERS = ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "FLEX", "K", "DST"];
 const OPPONENT_PROFILE = {
   source: "Fantasy Meltdown ADP room · 10 full mocks · 2026-08-30",
   targetRoster: { QB: 1.7, RB: 4.2, WR: 5.4, TE: 1.7, K: 1, DST: 1 },
@@ -16,7 +16,11 @@ const elements = Object.fromEntries([
   "needsStrip", "rosterList", "historyList", "undoButton", "settingsButton", "simulateButton", "setupDialog",
   "setupForm", "teamCount", "userSlot", "roundCount", "autoOpponents", "newDraftButton", "toast", "saveState",
   "projectionFile", "importStatus", "clearModelButton", "modelState", "fullSimButton", "simulationPace",
-  "viewLeagueButton", "leagueDialog", "closeLeagueButton", "leagueGrid", "leagueSummary"
+  "viewLeagueButton", "leagueDialog", "closeLeagueButton", "leagueGrid", "leagueSummary", "compareButton", "compareCount",
+  "scarcityPanel", "compareDialog", "closeCompareButton", "compareContent", "draftPreset", "draftFormat", "scoringFormat",
+  "slotQB", "slotRB", "slotWR", "slotTE", "slotFlex", "slotSuperflex", "slotK", "slotDST", "tePremium", "auctionBudget",
+  "sleeperLeagueId", "importSleeperButton", "sleeperImportStatus", "keepersInput", "tradedPicksInput", "exportDraftButton",
+  "shareDraftButton", "runBacktestButton"
 ].map((id) => [id, document.getElementById(id)]));
 
 let dataset;
@@ -25,16 +29,23 @@ let activePosition = "ALL";
 let toastTimer;
 let simulationNonce = 0;
 let isSimulating = false;
+let comparisonSelection = new Set();
+let monteCarlo = { key: null, results: null, running: false };
 let state = loadState();
 
 function defaultState() {
-  return { version: 1, settings: { teams: 10, userSlot: 5, rounds: 15, autoOpponents: true, simulationPace: 220 }, picks: [], model: null };
+  const settings = normalizeLeagueSettings({ teams: 10, userSlot: 5, rounds: 15, autoOpponents: true, simulationPace: 220, preset: "balanced" });
+  return { version: 2, settings, picks: [], keepers: [], tradedPicks: {}, cursor: 0, model: null, opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot), feedback: [], leagueImport: null, simulationSeed: Math.floor(Math.random() * 2 ** 31) };
 }
 
 function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (saved?.version === 1 && Array.isArray(saved.picks)) return { ...saved, settings: { ...defaultState().settings, ...saved.settings } };
+    if ([1, 2].includes(saved?.version) && Array.isArray(saved.picks)) {
+      const defaults = defaultState();
+      const settings = normalizeLeagueSettings({ ...defaults.settings, ...saved.settings });
+      return { ...defaults, ...saved, version: 2, settings, keepers: saved.keepers || [], tradedPicks: saved.tradedPicks || {}, cursor: Number.isInteger(saved.cursor) ? saved.cursor : saved.picks.length, opponentBeliefs: saved.opponentBeliefs || createOpponentBeliefs(settings.teams, settings.userSlot), feedback: saved.feedback || [] };
+    }
   } catch { /* A fresh board is safer than a broken saved state. */ }
   return defaultState();
 }
@@ -46,18 +57,48 @@ function saveState() {
 
 function teamName(index) { return index === state.settings.userSlot ? `Your team · ${index + 1}` : `Team ${index + 1}`; }
 
-function pickContext(pickIndex = state.picks.length) {
+function keeperSlotSet() {
+  const total = state.settings.teams * state.settings.rounds;
+  const needed = state.keepers.reduce((result, keeper) => ({ ...result, [keeper.team]: (result[keeper.team] || 0) + 1 }), {});
+  const reserved = new Set();
+  for (let index = total - 1; index >= 0; index--) {
+    const round = Math.floor(index / state.settings.teams);
+    const offset = index % state.settings.teams;
+    const team = round % 2 === 0 ? offset : state.settings.teams - 1 - offset;
+    if ((needed[team] || 0) > 0) { reserved.add(index); needed[team]--; }
+  }
+  return reserved;
+}
+
+function nextOpenDraftIndex(start = 0) {
+  const reserved = keeperSlotSet();
+  let index = start;
+  while (reserved.has(index)) index++;
+  return index;
+}
+
+function currentDraftIndex() { return nextOpenDraftIndex(Number.isInteger(state.cursor) ? state.cursor : state.picks.length); }
+
+function pickContext(pickIndex = currentDraftIndex()) {
   const { teams } = state.settings;
   const round = Math.floor(pickIndex / teams);
   const offset = pickIndex % teams;
-  const team = round % 2 === 0 ? offset : teams - 1 - offset;
+  const scheduledTeam = round % 2 === 0 ? offset : teams - 1 - offset;
+  const team = Number.isInteger(state.tradedPicks?.[pickIndex + 1]) ? state.tradedPicks[pickIndex + 1] : scheduledTeam;
   return { round, offset, team, overall: pickIndex + 1 };
 }
 
-function isComplete() { return state.picks.length >= state.settings.teams * state.settings.rounds; }
+function isComplete() { return currentDraftIndex() >= state.settings.teams * state.settings.rounds || state.picks.length + state.keepers.length >= state.settings.teams * state.settings.rounds; }
+
+function nextSelectionForTeam(pickIndex, team) {
+  const total = state.settings.teams * state.settings.rounds;
+  const reserved = keeperSlotSet();
+  for (let index = pickIndex + 1; index < total; index++) if (!reserved.has(index) && pickContext(index).team === team) return index;
+  return null;
+}
 
 function availablePlayers() {
-  const drafted = new Set(state.picks.map((pick) => pick.playerId));
+  const drafted = new Set([...state.picks.map((pick) => pick.playerId), ...state.keepers.map((keeper) => keeper.playerId)]);
   return dataset.players.filter((player) => !drafted.has(player.id) && (!dataset.liveData?.fresh || !["inactive", "retired"].includes(String(player.liveStatus || "").toLowerCase())));
 }
 
@@ -74,12 +115,14 @@ function applyLiveContext(context) {
       player.liveStatus = live.status;
       player.injury = live.injuryStatus || null;
       player.injuryBodyPart = live.injuryBodyPart;
+      player.injuryStartDate = live.injuryStartDate;
       player.practiceParticipation = live.practiceParticipation;
       player.practiceDescription = live.practiceDescription;
       player.newsUpdated = live.newsUpdated;
       player.trendingAdds = live.trendingAdds || 0;
       player.trendingDrops = live.trendingDrops || 0;
       player.lastSeason = live.lastSeason;
+      player.byeWeek = live.byeWeek;
       if (Number.isFinite(live.depthChartOrder)) player.depthOrder = live.depthChartOrder;
     }
   }
@@ -127,12 +170,12 @@ function recalculateModel() {
     : liveContext ? " The bundled live context is older than 48 hours, so availability overrides are disabled." : " Live context is unavailable; registry metadata remains in use.";
   elements.methodology.textContent = (consensus
     ? `ffanalytics weighted consensus from ${state.model.fileName} supplies projections, ranges, expert ranks, ADP, auction values, and uncertainty. Research-derived reliability, phase-aware floor/ceiling utility, dynamic replacement levels (${Object.entries(replacement).map(([position, rank]) => `${position}${rank}`).join(", ")}), roster feasibility, probabilistic tiers, and next-turn availability are recalculated for this room.`
-    : `${dataset.methodology} Research-derived reliability, rookie cold-start handling, roster feasibility, dynamic replacement levels, probabilistic tiers, and next-turn availability are recalculated for this ${state.settings.teams}-team room.`) + liveMethod;
+    : `${dataset.methodology} Research-derived reliability, rookie cold-start handling, roster feasibility, dynamic replacement levels, probabilistic tiers, and next-turn availability are recalculated for this ${state.settings.teams}-team room.`) + ` The production contract is full PPR; replacement ranks respond to ${state.settings.superflex ? "superflex" : "one-QB"} roster demand${state.settings.tePremium ? ` and a +${state.settings.tePremium} TE premium` : ""}. Recommendations are checked with stochastic rest-of-draft simulations and adaptive opponent beliefs.` + liveMethod;
 }
 
 function draftedPlayersForTeam(team) {
   const byId = new Map(dataset.players.map((player) => [player.id, player]));
-  return state.picks.filter((pick) => pick.team === team).map((pick) => byId.get(pick.playerId)).filter(Boolean);
+  return [...state.keepers.filter((keeper) => keeper.team === team), ...state.picks.filter((pick) => pick.team === team)].map((pick) => byId.get(pick.playerId)).filter(Boolean);
 }
 
 function countPositions(roster) {
@@ -144,23 +187,108 @@ function recentDraftedPlayers(limit = 5) {
   return state.picks.slice(-limit).map((pick) => byId.get(pick.playerId)).filter(Boolean);
 }
 
+function leagueStrategyImpact(player, roster, round, team) {
+  const slots = state.settings.rosterSlots;
+  if (["K", "DST"].includes(player.position) && !slots[player.position]) return -1000;
+  let impact = state.settings.superflex && player.position === "QB" ? (countPositions(roster).QB || 0) < 2 ? 30 : 8 : 0;
+  if (state.settings.tePremium && player.position === "TE") impact += state.settings.tePremium * 9;
+  if (team === state.settings.userSlot) {
+    const preset = state.settings.preset;
+    if (preset === "hero-rb") impact += player.position === "RB" && !(countPositions(roster).RB) && round < 3 ? 12 : player.position === "WR" && round < 7 ? 4 : 0;
+    if (preset === "wr-core" && player.position === "WR" && round < 6) impact += 9;
+    if (preset === "robust-rb" && player.position === "RB" && (countPositions(roster).RB || 0) < 2 && round < 5) impact += 10;
+    if (preset === "elite-te" && player.position === "TE" && player.tier === 1 && round < 5) impact += 12;
+    if (preset === "late-qb" && player.position === "QB" && round < 8 && !state.settings.superflex) impact -= 14;
+  }
+  return impact;
+}
+
+function leagueDraftProfile() {
+  const slots = state.settings.rosterSlots;
+  return {
+    ...OPPONENT_PROFILE,
+    targetRoster: {
+      QB: slots.QB + slots.SUPERFLEX * .85 + (state.settings.superflex ? .35 : .5),
+      RB: slots.RB + slots.FLEX * .5 + slots.BENCH * .34,
+      WR: slots.WR + slots.FLEX * .45 + slots.BENCH * .43,
+      TE: slots.TE + slots.FLEX * .05 + slots.BENCH * .13,
+      K: slots.K,
+      DST: slots.DST
+    },
+    medianFirstRound: { QB: state.settings.superflex ? 2 : 7, TE: state.settings.tePremium ? 5 : 7, K: state.settings.rounds, DST: Math.max(1, state.settings.rounds - 1) }
+  };
+}
+
 function recommendations(team = pickContext().team) {
   const roster = draftedPlayersForTeam(team);
   const context = pickContext();
   const available = availablePlayers();
   const recentPicks = recentDraftedPlayers();
-  const nextPickIndex = nextPickIndexForTeam(state.picks.length, team, state.settings.teams, state.settings.teams * state.settings.rounds);
+  const nextPickIndex = nextSelectionForTeam(context.overall - 1, team);
   return available
-    .map((player) => ({ player, ...scoreCandidate(player, { roster, round: context.round, currentPickIndex: state.picks.length, nextPickIndex, availablePlayers: available, profile: OPPONENT_PROFILE, totalRounds: state.settings.rounds, recentPicks }) }))
+    .map((player) => {
+      const decision = scoreCandidate(player, { roster, round: context.round, currentPickIndex: context.overall - 1, nextPickIndex, availablePlayers: available, profile: leagueDraftProfile(), totalRounds: state.settings.rounds, recentPicks });
+      const leagueImpact = leagueStrategyImpact(player, roster, context.round, team);
+      return { player, ...decision, score: decision.score + leagueImpact, factors: leagueImpact ? [...decision.factors, { label: "League format", impact: leagueImpact, detail: "PPR roster slots, superflex, TE premium, and the selected draft plan alter positional value." }].sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact)) : decision.factors };
+    })
     .sort((a, b) => b.score - a.score || b.player.vbd - a.player.vbd || a.player.rank - b.player.rank);
 }
 
+function allRosters() { return Array.from({ length: state.settings.teams }, (_, team) => draftedPlayersForTeam(team)); }
+
+function monteCarloKey(picks) {
+  return `${state.picks.length}|${state.settings.teams}|${state.settings.rounds}|${state.settings.preset}|${picks.slice(0, 3).map((pick) => pick.player.id).join(",")}`;
+}
+
+function scheduleMonteCarlo(picks, team) {
+  if (isComplete() || !picks.length) return;
+  const key = monteCarloKey(picks);
+  if (monteCarlo.key === key && (monteCarlo.results || monteCarlo.running)) return;
+  monteCarlo = { key, results: null, running: true };
+  setTimeout(() => {
+    if (monteCarlo.key !== key || isComplete()) return;
+    const candidateIds = picks.slice(0, 3).map((pick) => pick.player.id);
+    const watchPlayerIds = picks.slice(0, 10).map((pick) => pick.player.id);
+    const settings = { ...state.settings, totalDraftPicks: state.settings.teams * state.settings.rounds - state.keepers.length };
+    const results = runMonteCarloRestOfDraft({
+      candidateIds,
+      watchPlayerIds,
+      availablePlayers: availablePlayers(),
+      rosters: allRosters(),
+      currentPickIndex: state.picks.length,
+      currentTeam: team,
+      settings,
+      beliefs: state.opponentBeliefs,
+      simulations: 16,
+      seed: Date.now() + state.picks.length * 104729
+    });
+    if (monteCarlo.key === key) { monteCarlo = { key, results, running: false }; renderRecommendation(); }
+  }, 0);
+}
+
+function renderScarcity() {
+  const available = availablePlayers();
+  const positions = ["QB", "RB", "WR", "TE", "K", "DST"];
+  elements.scarcityPanel.innerHTML = positions.map((position) => {
+    const pool = available.filter((player) => player.position === position).sort((a, b) => b.projection - a.projection);
+    const top = pool[0];
+    const tierLeft = top ? pool.filter((player) => player.tier === top.tier).length : 0;
+    const pressure = top ? Math.min(100, Math.max(5, (top.tierDropoff || 0) * 7 + (tierLeft <= 2 ? 38 : 8))) : 0;
+    return `<article class="scarcity-item ${pressure >= 60 ? "hot" : ""}"><header><span>${position}</span><strong>${tierLeft} in tier</strong></header><div class="scarcity-track"><i style="width:${pressure}%"></i></div></article>`;
+  }).join("");
+}
+
 function slotRoster(players) {
-  const slots = [...STARTERS, ...Array.from({ length: Math.max(0, state.settings.rounds - STARTERS.length) }, (_, index) => `BN${index + 1}`)];
+  const configured = state.settings.rosterSlots;
+  const slots = [
+    ...["QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX", "K", "DST"].flatMap((position) => Array.from({ length: configured[position] || 0 }, () => position)),
+    ...Array.from({ length: configured.BENCH || 0 }, (_, index) => `BN${index + 1}`)
+  ];
   const assigned = slots.map((slot) => ({ slot, player: null }));
   for (const player of players) {
     let target = assigned.find((entry) => !entry.player && entry.slot === player.position);
     if (!target && ["RB", "WR", "TE"].includes(player.position)) target = assigned.find((entry) => !entry.player && entry.slot === "FLEX");
+    if (!target && ["QB", "RB", "WR", "TE"].includes(player.position)) target = assigned.find((entry) => !entry.player && entry.slot === "SUPERFLEX");
     if (!target) target = assigned.find((entry) => !entry.player && entry.slot.startsWith("BN"));
     if (target) target.player = player;
   }
@@ -169,8 +297,9 @@ function slotRoster(players) {
 
 function rosterGrade(players) {
   if (!players.length) return "—";
-  const scores = Array.from({ length: state.settings.teams }, (_, team) => rosterQuality(draftedPlayersForTeam(team)));
-  const score = rosterQuality(players);
+  const leagueRosters = Array.from({ length: state.settings.teams }, (_, team) => draftedPlayersForTeam(team));
+  const scores = leagueRosters.map((roster) => evaluateRoster(roster, state.settings, leagueRosters).score);
+  const score = evaluateRoster(players, state.settings, leagueRosters).score;
   const rank = [...scores].sort((a, b) => b - a).indexOf(score);
   const percentile = scores.length > 1 ? 1 - rank / (scores.length - 1) : .5;
   return percentile >= .9 ? "A" : percentile >= .72 ? "A−" : percentile >= .55 ? "B+" : percentile >= .38 ? "B" : percentile >= .2 ? "C+" : "C";
@@ -178,15 +307,19 @@ function rosterGrade(players) {
 
 function rosterQuality(players) {
   if (!players.length) return -1000;
-  const counts = countPositions(players);
-  const coverage = [counts.QB, counts.RB >= 2, counts.WR >= 2, counts.TE, counts.K, counts.DST].filter(Boolean).length;
-  const projection = players.reduce((sum, player) => sum + player.projection, 0);
-  const value = players.reduce((sum, player) => sum + player.vbd, 0);
-  return value + projection * .04 + coverage * 11;
+  const leagueRosters = Array.from({ length: state.settings.teams }, (_, team) => draftedPlayersForTeam(team));
+  return evaluateRoster(players, state.settings, leagueRosters).score;
 }
 
 function renderFilters() {
   elements.positionFilters.innerHTML = POSITIONS.map((position) => `<button class="filter-button ${position === activePosition ? "active" : ""}" type="button" data-position="${position}">${position}</button>`).join("");
+}
+
+function suggestedAuctionPrice(player) {
+  if (Number.isFinite(player.auctionValue)) return Math.max(1, Math.round(player.auctionValue));
+  const budget = state.settings.auctionBudget || 200;
+  const scarcity = Math.max(0, player.vbd || 0);
+  return Math.max(1, Math.min(Math.round(budget * .36), Math.round(1 + scarcity * budget / 520)));
 }
 
 function renderBoard() {
@@ -198,12 +331,12 @@ function renderBoard() {
   elements.poolCount.textContent = availablePlayers().length.toLocaleString();
   const context = pickContext();
   const team = context.team;
-  const nextPickIndex = nextPickIndexForTeam(state.picks.length, team, state.settings.teams, state.settings.teams * state.settings.rounds);
+  const nextPickIndex = nextSelectionForTeam(context.overall - 1, team);
   const roster = draftedPlayersForTeam(team);
   const available = availablePlayers();
   const recentPicks = recentDraftedPlayers();
   elements.playerRows.innerHTML = players.slice(0, 50).map((player) => {
-    const decision = scoreCandidate(player, { roster, round: context.round, currentPickIndex: state.picks.length, nextPickIndex, availablePlayers: available, profile: OPPONENT_PROFILE, totalRounds: state.settings.rounds, recentPicks });
+    const decision = scoreCandidate(player, { roster, round: context.round, currentPickIndex: context.overall - 1, nextPickIndex, availablePlayers: available, profile: leagueDraftProfile(), totalRounds: state.settings.rounds, recentPicks });
     const trend = player.trendingAdds > player.trendingDrops && player.trendingAdds >= 5 ? `↑ ${player.trendingAdds} adds` : null;
     const signal = player.injury || trend || `T${player.tier} · ${decision.hasNextPick ? `${Math.round(decision.availability * 100)}% next` : "final turn"}`;
     const lowRisk = Number.isFinite(player.uncertainty) && player.uncertainty <= (player.uncertainty <= 1 ? .33 : 33);
@@ -214,16 +347,18 @@ function renderBoard() {
       <td class="metric">${player.projection.toFixed(1)}</td>
       <td class="metric ${player.vbd > 0 ? "vbd-positive" : ""}">${player.vbd > 0 ? "+" : ""}${player.vbd.toFixed(1)}</td>
       <td class="signal ${player.injury ? "warn" : lowRisk ? "low-risk" : ""}">${escapeHtml(signal)}</td>
-      <td><button class="draft-button" type="button" data-draft="${player.id}" ${isComplete() || isSimulating ? "disabled" : ""}>Draft</button></td>
+      <td><div class="row-actions"><button class="compare-pick ${comparisonSelection.has(player.id) ? "selected" : ""}" type="button" data-compare="${player.id}" aria-label="Compare ${escapeHtml(player.name)}">±</button><button class="draft-button" type="button" data-draft="${player.id}" ${isComplete() || isSimulating ? "disabled" : ""}>${state.settings.draftFormat === "auction" ? `$${suggestedAuctionPrice(player)}` : "Draft"}</button></div></td>
     </tr>`;
   }).join("") || `<tr><td class="empty-row" colspan="7">No available players match this filter.</td></tr>`;
+  elements.compareCount.textContent = comparisonSelection.size;
+  elements.compareButton.disabled = comparisonSelection.size < 2;
 }
 
 function renderClock() {
   if (isComplete()) {
     elements.clockTeam.textContent = "Draft complete";
     elements.roundLabel.textContent = `${state.settings.rounds} rounds`;
-    elements.pickLabel.textContent = `${state.picks.length} picks made`;
+    elements.pickLabel.textContent = `${state.picks.length + state.keepers.length} roster slots filled`;
     elements.clockTrack.innerHTML = "";
     elements.simulateButton.disabled = true;
     elements.fullSimButton.disabled = true;
@@ -232,13 +367,13 @@ function renderClock() {
   }
   const context = pickContext();
   elements.clockTeam.textContent = teamName(context.team);
-  elements.roundLabel.textContent = `Round ${context.round + 1}`;
+  elements.roundLabel.textContent = state.settings.draftFormat === "auction" ? `Nomination ${context.overall}` : `Round ${context.round + 1}`;
   elements.pickLabel.textContent = `Pick ${context.round + 1}.${String(context.offset + 1).padStart(2, "0")} · #${context.overall}`;
   elements.clockTrack.innerHTML = Array.from({ length: state.settings.teams }, (_, index) => `<span class="clock-dot ${index < context.offset ? "done" : index === context.offset ? "current" : ""}"></span>`).join("");
   elements.simulateButton.disabled = isSimulating || context.team === state.settings.userSlot;
   elements.simulateButton.textContent = context.team === state.settings.userSlot ? "Your Pick Is Ready" : "Run to My Pick";
   elements.fullSimButton.disabled = false;
-  elements.fullSimButton.textContent = isSimulating ? "Pause Simulation" : "Simulate Full Draft";
+  elements.fullSimButton.textContent = isSimulating ? "Pause Simulation" : state.settings.draftFormat === "auction" ? "Simulate Auction" : "Simulate Full Draft";
 }
 
 function renderRecommendation() {
@@ -249,7 +384,12 @@ function renderRecommendation() {
     return;
   }
   const context = pickContext();
-  const picks = recommendations(context.team);
+  const basePicks = recommendations(context.team);
+  const key = monteCarloKey(basePicks);
+  const hasSimulation = monteCarlo.key === key && monteCarlo.results;
+  const simulatedLeaders = hasSimulation ? basePicks.slice(0, 3).sort((a, b) => (monteCarlo.results[b.player.id]?.expectedRosterScore || 0) - (monteCarlo.results[a.player.id]?.expectedRosterScore || 0)) : basePicks.slice(0, 3);
+  const leaderIds = new Set(simulatedLeaders.map((pick) => pick.player.id));
+  const picks = [...simulatedLeaders, ...basePicks.filter((pick) => !leaderIds.has(pick.player.id))];
   const bestPick = picks[0];
   const best = bestPick?.player;
   if (!best) return;
@@ -257,30 +397,42 @@ function renderRecommendation() {
   elements.confidence.textContent = gap > 15 ? "Strong edge" : gap > 6 ? "Clear lean" : "Close call";
   const consensusMeta = best.modelSource === "ffanalytics" ? `${best.projectionMethod?.toUpperCase() || "FFA"} CONSENSUS${best.consensusTier ? ` · SOURCE TIER ${best.consensusTier}` : ""}` : best.depthOrder === 1 ? "PROJECTED STARTER" : "ACTIVE ROSTER";
   const factorRows = bestPick.factors.slice(0, 4).map((factor) => `<li><span>${escapeHtml(factor.label)}</span><strong class="${factor.impact >= 0 ? "positive" : "negative"}">${factor.impact >= 0 ? "+" : ""}${factor.impact.toFixed(1)}</strong><small>${escapeHtml(factor.detail)}</small></li>`).join("");
+  const mc = hasSimulation ? monteCarlo.results[best.id] : null;
+  const survivalRows = mc ? picks.slice(1, 5).map(({ player }) => {
+    const survival = mc.survival[player.id] ?? 0;
+    return `<div class="availability-bar"><span>${escapeHtml(player.lastName || player.name)}</span><i style="width:${Math.round(survival * 100)}%"></i><strong>${Math.round(survival * 100)}%</strong></div>`;
+  }).join("") : "";
+  const mcSummary = mc ? `<section class="mc-summary"><header><span>Monte Carlo rest-of-draft</span><strong>${mc.simulations} paths</strong></header><div class="mc-grid"><div><span>Expected lineup</span><strong>${mc.expectedWeekly.toFixed(1)}/wk</strong></div><div><span>Expected wins</span><strong>${Math.round(mc.expectedWinRate * 100)}%</strong></div><div><span>80% range</span><strong>${mc.downsideWeekly.toFixed(1)}–${mc.upsideWeekly.toFixed(1)}</strong></div></div><div class="availability-bars">${survivalRows}</div></section>` : `<section class="mc-summary"><header><span>Monte Carlo rest-of-draft</span><strong>${monteCarlo.running ? "Running…" : "Queued"}</strong></header></section>`;
   elements.recommendationCard.innerHTML = `
     <div class="rec-topline"><span class="pos-badge pos-${best.position}">${best.position}</span><span class="rec-rank">BOARD #${best.rank}</span></div>
     <h2 id="recommendationTitle">${escapeHtml(best.name)}</h2>
     <div class="rec-meta">${best.team} · ${consensusMeta}</div>
-    <p class="rec-reason">Best research-adjusted combination of value, ${bestPick.phase.toLowerCase()} utility, roster feasibility, tier urgency, and wait risk.</p>
+    <p class="rec-reason">${mc ? "Best expected completed PPR roster across simulated draft paths, with" : "Best research-adjusted combination of"} value, ${bestPick.phase.toLowerCase()} utility, roster feasibility, tier urgency, and wait risk.</p>
     <div class="rec-metrics"><div><span>Est. points</span><strong>${best.projection.toFixed(1)}</strong></div><div><span>Dynamic VBD</span><strong>${best.vbd > 0 ? "+" : ""}${best.vbd.toFixed(1)}</strong></div><div><span>Reliability</span><strong>${Math.round(bestPick.reliability * 100)}%</strong></div><div><span>Chance at next pick</span><strong>${bestPick.hasNextPick ? `${Math.round(bestPick.availability * 100)}%` : "No next turn"}</strong></div></div>
+    ${mcSummary}
     <div class="factor-heading">Why the model likes this pick</div><ul class="factor-list">${factorRows}</ul>
-    <button class="button button-gold" type="button" data-draft="${best.id}">Draft ${escapeHtml(best.lastName || best.name)}</button>`;
+    <div class="rec-actions"><button class="button button-quiet" type="button" data-what-if="${best.id}">What if?</button><button class="button button-gold" type="button" data-draft="${best.id}">${state.settings.draftFormat === "auction" ? `Bid $${suggestedAuctionPrice(best)}` : `Draft ${escapeHtml(best.lastName || best.name)}`}</button></div>
+    <div class="feedback-buttons"><button type="button" data-feedback="agree" data-player="${best.id}">Recommendation makes sense</button><button type="button" data-feedback="disagree" data-player="${best.id}">I prefer someone else</button></div>`;
   elements.alternatives.innerHTML = picks.slice(1, 4).map(({ player }, index) => `<div class="alternative"><em>0${index + 2}</em><strong>${escapeHtml(player.name)}</strong><span class="pos-badge pos-${player.position}">${player.position}</span></div>`).join("");
+  scheduleMonteCarlo(basePicks, context.team);
 }
 
 function renderRoster() {
   const team = state.settings.userSlot;
   const players = draftedPlayersForTeam(team);
   const counts = countPositions(players);
+  const evaluation = evaluateRoster(players, state.settings, allRosters());
   elements.rosterTitle.textContent = `Team ${team + 1} roster`;
   elements.rosterGrade.textContent = rosterGrade(players);
-  const needs = [{ p: "QB", n: 1 }, { p: "RB", n: 2 }, { p: "WR", n: 2 }, { p: "TE", n: 1 }, { p: "FLEX", n: 2 }, { p: "K", n: 1 }, { p: "DST", n: 1 }];
-  const skillExtra = Math.max(0, (counts.RB || 0) + (counts.WR || 0) + (counts.TE || 0) - 5);
+  const slots = state.settings.rosterSlots;
+  const needs = ["QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX", "K", "DST"].filter((position) => slots[position] > 0).map((position) => ({ p: position, n: slots[position] }));
+  const skillExtra = Math.max(0, (counts.RB || 0) + (counts.WR || 0) + (counts.TE || 0) - slots.RB - slots.WR - slots.TE);
   elements.needsStrip.innerHTML = needs.map(({ p, n }) => {
-    const filled = p === "FLEX" ? Math.min(n, skillExtra) : Math.min(n, counts[p] || 0);
+    const filled = p === "FLEX" ? Math.min(n, skillExtra) : p === "SUPERFLEX" ? Math.min(n, Math.max(0, (counts.QB || 0) - slots.QB) + skillExtra) : Math.min(n, counts[p] || 0);
     return `<span class="need-chip ${filled >= n ? "filled" : "open"}">${p} ${filled}/${n}</span>`;
   }).join("");
-  elements.rosterList.innerHTML = slotRoster(players).map(({ slot, player }) => `<div class="roster-row"><span class="slot">${slot}</span>${player ? `<strong>${escapeHtml(player.name)}</strong><small>${player.team} · ${player.position}</small>` : `<span class="empty">Open slot</span><small>—</small>`}</div>`).join("");
+  const matchupEdge = players.length ? `${Math.round(evaluation.expectedWins * 100)}% matchup edge` : "Matchup edge pending";
+  elements.rosterList.innerHTML = `<div class="roster-row"><span class="slot">PPR</span><strong>${evaluation.weekly.toFixed(1)} projected / week</strong><small>${matchupEdge}</small></div>` + slotRoster(players).map(({ slot, player }) => `<div class="roster-row"><span class="slot">${slot}</span>${player ? `<strong>${escapeHtml(player.name)}</strong><small>${player.team} · ${player.position}${player.byeWeek ? ` · BYE ${player.byeWeek}` : ""}</small>` : `<span class="empty">Open slot</span><small>—</small>`}</div>`).join("");
 }
 
 function renderHistory() {
@@ -288,26 +440,32 @@ function renderHistory() {
   const recent = state.picks.slice(-8).reverse();
   elements.historyList.innerHTML = recent.map((pick) => {
     const player = byId.get(pick.playerId);
-    return `<div class="history-row"><span>#${pick.index + 1}</span><strong>${escapeHtml(player?.name || "Unknown player")}</strong><small>${teamName(pick.team)}</small></div>`;
+    return `<div class="history-row"><span>#${pick.index + 1}</span><strong>${escapeHtml(player?.name || "Unknown player")}${pick.price ? ` · $${pick.price}` : ""}</strong><small>${teamName(pick.team)}</small></div>`;
   }).join("") || `<div class="history-empty">No picks yet. The board is yours.</div>`;
   elements.undoButton.disabled = !state.picks.length || isSimulating;
 }
 
 function renderLeagueResults() {
+  const leagueRosters = allRosters();
   const teamRows = Array.from({ length: state.settings.teams }, (_, team) => {
     const players = draftedPlayersForTeam(team);
-    return { team, players, score: rosterQuality(players), grade: rosterGrade(players) };
+    const evaluation = evaluateRoster(players, state.settings, leagueRosters);
+    return { team, players, score: evaluation.score, grade: rosterGrade(players), evaluation };
   }).sort((a, b) => b.score - a.score);
   const leader = teamRows[0];
   elements.leagueSummary.textContent = state.picks.length
-    ? `${state.picks.length} of ${state.settings.teams * state.settings.rounds} picks complete. ${teamName(leader.team)} currently leads the room.`
+    ? `${state.picks.length + state.keepers.length} of ${state.settings.teams * state.settings.rounds} roster slots filled in this PPR room. ${teamName(leader.team)} currently leads the room.`
     : "Team grades update after every pick and compare value, projected output, and roster coverage.";
-  elements.leagueGrid.innerHTML = teamRows.map(({ team, players, grade }, index) => {
+  elements.leagueGrid.innerHTML = teamRows.map(({ team, players, grade, evaluation }, index) => {
     const counts = countPositions(players);
-    const projection = players.reduce((sum, player) => sum + player.projection, 0);
+    const style = dominantOpponentStyle(state.opponentBeliefs[team]);
+    const spent = state.picks.filter((pick) => pick.team === team).reduce((sum, pick) => sum + (pick.price || 0), 0);
+    const budgetLine = state.settings.draftFormat === "auction" ? `<span>$${spent} spent · $${state.settings.auctionBudget - spent} left</span>` : "";
+    const explanation = evaluation.explanations.slice(0, 4).map((item) => `<span><strong>${escapeHtml(item.label)}</strong><br>${escapeHtml(item.value)}</span>`).join("");
     return `<article class="team-card ${team === state.settings.userSlot ? "is-user" : ""}">
-      <header><div><span>${index === 0 && players.length ? "ROOM LEADER" : `DRAFT SLOT ${team + 1}`} · ${team === state.settings.userSlot ? "RECOMMENDATION MODEL" : escapeHtml(opponentStrategyForTeam(team).name.toUpperCase())}</span><h3>${escapeHtml(teamName(team))}</h3></div><strong>${grade}</strong></header>
-      <div class="team-card-stats"><span>${players.length} picks</span><span>${projection.toLocaleString(undefined, { maximumFractionDigits: 1 })} pts</span><span>QB ${counts.QB || 0} · RB ${counts.RB || 0} · WR ${counts.WR || 0} · TE ${counts.TE || 0}</span></div>
+      <header><div><span>${index === 0 && players.length ? "ROOM LEADER" : `DRAFT SLOT ${team + 1}`} · ${team === state.settings.userSlot ? "RECOMMENDATION MODEL" : `${escapeHtml(style.name.toUpperCase())} ${Math.round(style.confidence * 100)}%`}</span><h3>${escapeHtml(teamName(team))}</h3></div><strong>${grade}</strong></header>
+      <div class="team-card-stats"><span>${players.length} players</span><span>${evaluation.weekly.toFixed(1)} PPR/wk</span><span>${Math.round(evaluation.expectedWins * 100)}% expected wins</span>${budgetLine}<span>QB ${counts.QB || 0} · RB ${counts.RB || 0} · WR ${counts.WR || 0} · TE ${counts.TE || 0}</span></div>
+      <div class="grade-explain">${explanation}</div>
       <ol>${players.map((player) => `<li><span class="pos-badge pos-${player.position}">${player.position}</span><strong>${escapeHtml(player.name)}</strong><small>${player.team}</small></li>`).join("") || "<li class=\"team-empty\">No picks yet.</li>"}</ol>
     </article>`;
   }).join("");
@@ -316,6 +474,7 @@ function renderLeagueResults() {
 function renderAll() {
   renderFilters();
   renderClock();
+  renderScarcity();
   renderBoard();
   renderRecommendation();
   renderRoster();
@@ -326,12 +485,17 @@ function renderAll() {
 function draftPlayer(playerId, isAuto = false) {
   if (isComplete() || state.picks.some((pick) => pick.playerId === playerId)) return;
   const context = pickContext();
-  state.picks.push({ playerId, team: context.team, index: state.picks.length });
+  const player = dataset.players.find((candidate) => candidate.id === playerId);
+  const rosterBefore = draftedPlayersForTeam(context.team);
+  state.opponentBeliefs[context.team] = updateOpponentBelief(state.opponentBeliefs[context.team], { player, rosterBefore, round: context.round, pickNumber: context.overall, recentPicks: recentDraftedPlayers() });
+  const price = state.settings.draftFormat === "auction" ? suggestedAuctionPrice(player) : null;
+  state.picks.push({ playerId, team: context.team, index: context.overall - 1, price });
+  state.cursor = nextOpenDraftIndex(context.overall);
+  monteCarlo = { key: null, results: null, running: false };
   saveState();
   renderAll();
   if (!isAuto) {
-    const player = dataset.players.find((candidate) => candidate.id === playerId);
-    showToast(`${player.name} drafted by ${teamName(context.team)}`);
+    showToast(`${player.name} ${price ? `won for $${price}` : "drafted"} by ${teamName(context.team)}`);
     if (state.settings.autoOpponents && !isComplete()) setTimeout(runToUserPick, 180);
   }
 }
@@ -340,13 +504,15 @@ function autoPick() {
   const context = pickContext();
   const roster = draftedPlayersForTeam(context.team);
   const recentPicks = recentDraftedPlayers();
-  const choices = recommendations(context.team).slice(0, 20);
+  const spent = state.picks.filter((pick) => pick.team === context.team).reduce((sum, pick) => sum + (pick.price || 0), 0);
+  const remainingBudget = state.settings.auctionBudget - spent;
+  const choices = recommendations(context.team).filter(({ player }) => state.settings.draftFormat !== "auction" || suggestedAuctionPrice(player) <= remainingBudget).slice(0, 20);
   if (!choices.length) return;
   const ranked = choices.map((choice) => {
-    const strategy = opponentStrategyImpact(choice.player, { roster, round: context.round, team: context.team, recentPicks });
-    const hash = [...String(choice.player.id)].reduce((value, character) => (value * 31 + character.charCodeAt(0)) % 997, state.picks.length + context.team * 17);
+    const adaptiveBias = expectedOpponentBias(state.opponentBeliefs[context.team], choice.player, roster, context.round);
+    const hash = [...String(choice.player.id)].reduce((value, character) => (value * 31 + character.charCodeAt(0)) % 997, state.simulationSeed + state.picks.length * 19 + context.team * 17);
     const stableVariation = (hash / 997 - .5) * 3;
-    return { ...choice, opponentScore: choice.score + strategy.impact + stableVariation };
+    return { ...choice, opponentScore: choice.score + adaptiveBias + stableVariation };
   }).sort((a, b) => b.opponentScore - a.opponentScore || b.score - a.score);
   draftPlayer(ranked[0].player.id, true);
 }
@@ -393,14 +559,124 @@ function undo() {
   } else {
     state.picks.pop();
   }
+  state.cursor = state.picks.length ? nextOpenDraftIndex(state.picks[state.picks.length - 1].index + 1) : 0;
+  rebuildOpponentBeliefs();
+  monteCarlo = { key: null, results: null, running: false };
   saveState();
   renderAll();
   showToast("Last selection undone");
 }
 
+function rebuildOpponentBeliefs() {
+  const beliefs = createOpponentBeliefs(state.settings.teams, state.settings.userSlot);
+  const rosters = Array.from({ length: state.settings.teams }, (_, team) => state.keepers.filter((keeper) => keeper.team === team).map((keeper) => dataset.players.find((player) => player.id === keeper.playerId)).filter(Boolean));
+  const recent = [];
+  for (const pick of state.picks) {
+    const player = dataset.players.find((candidate) => candidate.id === pick.playerId);
+    if (!player) continue;
+    const round = Math.floor(pick.index / state.settings.teams);
+    beliefs[pick.team] = updateOpponentBelief(beliefs[pick.team], { player, rosterBefore: rosters[pick.team], round, pickNumber: pick.index + 1, recentPicks: recent.slice(-5) });
+    rosters[pick.team].push(player);
+    recent.push(player);
+  }
+  state.opponentBeliefs = beliefs;
+}
+
 function populateSlots(selected = state.settings.userSlot) {
   const teams = Number(elements.teamCount.value || state.settings.teams);
   elements.userSlot.innerHTML = Array.from({ length: teams }, (_, index) => `<option value="${index}" ${index === Math.min(selected, teams - 1) ? "selected" : ""}>Pick ${index + 1}</option>`).join("");
+}
+
+function rosterSlotsFromForm() {
+  return { QB: Number(elements.slotQB.value), RB: Number(elements.slotRB.value), WR: Number(elements.slotWR.value), TE: Number(elements.slotTE.value), FLEX: Number(elements.slotFlex.value), SUPERFLEX: Number(elements.slotSuperflex.value), K: Number(elements.slotK.value), DST: Number(elements.slotDST.value) };
+}
+
+function setRosterSlotFields(slots) {
+  elements.slotQB.value = slots.QB ?? 1; elements.slotRB.value = slots.RB ?? 2; elements.slotWR.value = slots.WR ?? 2; elements.slotTE.value = slots.TE ?? 1;
+  elements.slotFlex.value = slots.FLEX ?? 2; elements.slotSuperflex.value = slots.SUPERFLEX ?? 0; elements.slotK.value = slots.K ?? 1; elements.slotDST.value = slots.DST ?? 1;
+}
+
+function parseManualKeepers(text) {
+  const byName = new Map(dataset.players.map((player) => [normalizedName(player.name), player]));
+  const keepers = [];
+  const usedPlayers = new Set();
+  for (const line of String(text || "").split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
+    const match = line.match(/^Team\s+(\d+)\s*:\s*(.+)$/i);
+    if (!match) continue;
+    const team = Number(match[1]) - 1;
+    const rawPlayer = match[2].trim();
+    const player = dataset.players.find((item) => item.id === rawPlayer) || byName.get(normalizedName(rawPlayer));
+    if (player && team >= 0 && team < Number(elements.teamCount.value) && !usedPlayers.has(player.id)) {
+      keepers.push({ playerId: player.id, team, keeper: true });
+      usedPlayers.add(player.id);
+    }
+  }
+  return keepers;
+}
+
+function parseTradedPicks(text) {
+  const traded = {};
+  const teams = Number(elements.teamCount.value);
+  const maxPicks = teams * Number(elements.rounds.value);
+  for (const line of String(text || "").split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
+    const match = line.match(/^(\d+)\s*:\s*Team\s+(\d+)$/i);
+    if (!match) continue;
+    const overall = Number(match[1]);
+    const team = Number(match[2]) - 1;
+    if (overall >= 1 && overall <= maxPicks && team >= 0 && team < teams) traded[overall] = team;
+  }
+  return traded;
+}
+
+async function importSleeperLeague() {
+  const leagueId = elements.sleeperLeagueId.value.trim();
+  if (!/^\d+$/.test(leagueId)) { elements.sleeperImportStatus.textContent = "Enter a numeric Sleeper league ID."; return; }
+  elements.importSleeperButton.disabled = true;
+  elements.sleeperImportStatus.textContent = "Loading public Sleeper league configuration…";
+  try {
+    const leagueResponse = await fetch(`https://api.sleeper.app/v1/league/${leagueId}`);
+    if (!leagueResponse.ok) throw new Error(`League returned ${leagueResponse.status}`);
+    const league = await leagueResponse.json();
+    const draftsResponse = await fetch(`https://api.sleeper.app/v1/league/${leagueId}/drafts`);
+    const drafts = draftsResponse.ok ? await draftsResponse.json() : [];
+    const draft = drafts[0] || null;
+    const teams = Number(league.total_rosters || draft?.settings?.teams || 10);
+    if (![...elements.teamCount.options].some((option) => Number(option.value) === teams)) elements.teamCount.add(new Option(String(teams), String(teams)));
+    elements.teamCount.value = String(teams);
+    const positionMap = { QB: "QB", RB: "RB", WR: "WR", TE: "TE", FLEX: "FLEX", WRRB_FLEX: "FLEX", REC_FLEX: "FLEX", SUPER_FLEX: "SUPERFLEX", K: "K", DEF: "DST" };
+    const slots = { QB: 0, RB: 0, WR: 0, TE: 0, FLEX: 0, SUPERFLEX: 0, K: 0, DST: 0 };
+    for (const position of league.roster_positions || []) if (positionMap[position]) slots[positionMap[position]]++;
+    setRosterSlotFields(slots);
+    const rounds = Number(draft?.settings?.rounds || (league.roster_positions || []).length || 15);
+    if (![...elements.roundCount.options].some((option) => Number(option.value) === rounds)) elements.roundCount.add(new Option(String(rounds), String(rounds)));
+    elements.roundCount.value = String(rounds);
+    elements.draftFormat.value = draft?.type === "auction" ? "auction" : "snake";
+    elements.tePremium.value = Number(league.scoring_settings?.bonus_rec_te || 0) >= 1 ? "1" : Number(league.scoring_settings?.bonus_rec_te || 0) >= .5 ? "0.5" : "0";
+    populateSlots(Math.min(state.settings.userSlot, teams - 1));
+    let keeperLines = [];
+    let tradedLines = [];
+    if (draft?.draft_id) {
+      const [picksResponse, tradedResponse] = await Promise.all([fetch(`https://api.sleeper.app/v1/draft/${draft.draft_id}/picks`), fetch(`https://api.sleeper.app/v1/draft/${draft.draft_id}/traded_picks`)]);
+      const picks = picksResponse.ok ? await picksResponse.json() : [];
+      const traded = tradedResponse.ok ? await tradedResponse.json() : [];
+      const slotByRoster = new Map(Object.entries(draft.slot_to_roster_id || {}).map(([slot, roster]) => [Number(roster), Number(slot)]));
+      keeperLines = picks.filter((pick) => pick.is_keeper).map((pick) => `Team ${slotByRoster.get(Number(pick.roster_id)) || pick.draft_slot}: ${dataset.players.find((player) => player.id === String(pick.player_id))?.name || pick.player_id}`);
+      tradedLines = traded.map((pick) => {
+        const originalSlot = slotByRoster.get(Number(pick.roster_id));
+        const ownerSlot = slotByRoster.get(Number(pick.owner_id));
+        if (!originalSlot || !ownerSlot) return null;
+        const round = Number(pick.round);
+        const offset = round % 2 === 1 ? originalSlot : teams - originalSlot + 1;
+        return `${(round - 1) * teams + offset}: Team ${ownerSlot}`;
+      }).filter(Boolean);
+    }
+    elements.keepersInput.value = keeperLines.join("\n");
+    elements.tradedPicksInput.value = tradedLines.join("\n");
+    state.leagueImport = { leagueId, name: league.name || "Sleeper league", importedAt: new Date().toISOString(), originalReceptionScoring: league.scoring_settings?.rec ?? null };
+    const scoringNote = Number(league.scoring_settings?.rec) === 1 ? "PPR scoring confirmed" : "source scoring noted; production model remains locked to PPR";
+    elements.sleeperImportStatus.textContent = `${league.name || "League"}: ${teams} teams · ${rounds} rounds · ${keeperLines.length} keepers · ${tradedLines.length} traded picks · ${scoringNote}.`;
+  } catch (error) { elements.sleeperImportStatus.textContent = `Sleeper import failed: ${error.message}`; }
+  finally { elements.importSleeperButton.disabled = false; }
 }
 
 function openSetup() {
@@ -410,6 +686,14 @@ function openSetup() {
   elements.roundCount.value = state.settings.rounds;
   elements.autoOpponents.checked = state.settings.autoOpponents;
   elements.simulationPace.value = String(state.settings.simulationPace);
+  elements.draftPreset.value = state.settings.preset || "balanced";
+  elements.draftFormat.value = state.settings.draftFormat || "snake";
+  elements.tePremium.value = String(state.settings.tePremium || 0);
+  elements.auctionBudget.value = state.settings.auctionBudget || 200;
+  elements.sleeperLeagueId.value = state.leagueImport?.leagueId || "";
+  elements.keepersInput.value = state.keepers.map((keeper) => `Team ${keeper.team + 1}: ${dataset.players.find((player) => player.id === keeper.playerId)?.name || keeper.playerId}`).join("\n");
+  elements.tradedPicksInput.value = Object.entries(state.tradedPicks).map(([pick, team]) => `${pick}: Team ${team + 1}`).join("\n");
+  setRosterSlotFields(state.settings.rosterSlots);
   populateSlots();
   recalculateModel();
   elements.setupDialog.showModal();
@@ -419,18 +703,33 @@ function startNewDraft(event) {
   event.preventDefault();
   simulationNonce++;
   isSimulating = false;
-  state = {
-    version: 1,
-    settings: {
+  const settings = normalizeLeagueSettings({
       teams: Number(elements.teamCount.value),
       userSlot: Number(elements.userSlot.value),
       rounds: Number(elements.roundCount.value),
       autoOpponents: elements.autoOpponents.checked,
-      simulationPace: Number(elements.simulationPace.value)
-    },
+      simulationPace: Number(elements.simulationPace.value),
+      rosterSlots: rosterSlotsFromForm(),
+      tePremium: Number(elements.tePremium.value),
+      draftFormat: elements.draftFormat.value,
+      auctionBudget: Number(elements.auctionBudget.value),
+      preset: elements.draftPreset.value
+  });
+  state = {
+    version: 2,
+    settings,
     picks: [],
-    model: state.model
+    cursor: 0,
+    keepers: parseManualKeepers(elements.keepersInput.value),
+    tradedPicks: parseTradedPicks(elements.tradedPicksInput.value),
+    model: state.model,
+    opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot),
+    feedback: state.feedback || [],
+    leagueImport: state.leagueImport,
+    simulationSeed: Math.floor(Math.random() * 2 ** 31)
   };
+  comparisonSelection.clear();
+  monteCarlo = { key: null, results: null, running: false };
   recalculateModel();
   saveState();
   elements.setupDialog.close();
@@ -477,6 +776,12 @@ document.addEventListener("click", (event) => {
   if (draftButton) draftPlayer(draftButton.dataset.draft);
   const filterButton = event.target.closest("[data-position]");
   if (filterButton) { activePosition = filterButton.dataset.position; syncBoardUrl(); renderFilters(); renderBoard(); }
+  const comparePick = event.target.closest("[data-compare]");
+  if (comparePick) toggleComparison(comparePick.dataset.compare);
+  const whatIf = event.target.closest("[data-what-if]");
+  if (whatIf) openComparison([whatIf.dataset.whatIf]);
+  const feedback = event.target.closest("[data-feedback]");
+  if (feedback) recordRecommendationFeedback(feedback.dataset.feedback, feedback.dataset.player);
   if (event.target.closest("[data-open-results]")) openLeagueResults();
 });
 function syncBoardUrl() {
@@ -488,6 +793,81 @@ function syncBoardUrl() {
 }
 function openLeagueResults() { renderLeagueResults(); elements.leagueDialog.showModal(); }
 
+function toggleComparison(playerId) {
+  if (comparisonSelection.has(playerId)) comparisonSelection.delete(playerId);
+  else {
+    if (comparisonSelection.size >= 2) comparisonSelection.delete(comparisonSelection.values().next().value);
+    comparisonSelection.add(playerId);
+  }
+  renderBoard();
+}
+
+function openComparison(playerIds = [...comparisonSelection]) {
+  const team = state.settings.userSlot;
+  const roster = draftedPlayersForTeam(team);
+  const picks = recommendations(pickContext().team);
+  const decisionById = new Map(picks.map((pick) => [pick.player.id, pick]));
+  const cards = playerIds.map((id) => {
+    const player = dataset.players.find((candidate) => candidate.id === id);
+    if (!player) return "";
+    const decision = decisionById.get(id);
+    const before = evaluateRoster(roster, state.settings, allRosters());
+    const after = evaluateRoster([...roster, player], state.settings, allRosters().map((teamRoster, index) => index === team ? [...teamRoster, player] : teamRoster));
+    const mc = monteCarlo.results?.[id];
+    return `<article class="comparison-card"><span class="pos-badge pos-${player.position}">${player.position}</span><h3>${escapeHtml(player.name)}</h3><small>${player.team} · Tier ${player.tier}${player.byeWeek ? ` · Bye ${player.byeWeek}` : ""}</small><div class="comparison-metrics"><div><span>Projection</span><strong>${player.projection.toFixed(1)}</strong></div><div><span>VBD</span><strong>${player.vbd >= 0 ? "+" : ""}${player.vbd.toFixed(1)}</strong></div><div><span>Next-pick chance</span><strong>${decision?.hasNextPick ? `${Math.round(decision.availability * 100)}%` : "Final"}</strong></div><div><span>MC lineup</span><strong>${mc ? `${mc.expectedWeekly.toFixed(1)}/wk` : "Pending"}</strong></div></div><div class="what-if-result"><strong>What-if:</strong> projected starting lineup moves from ${before.weekly.toFixed(1)} to ${after.weekly.toFixed(1)} PPR points/week; roster score changes ${after.score - before.score >= 0 ? "+" : ""}${(after.score - before.score).toFixed(1)}.</div></article>`;
+  }).join("");
+  elements.compareContent.innerHTML = `<div class="comparison-grid">${cards}</div>`;
+  elements.compareDialog.showModal();
+}
+
+function recordRecommendationFeedback(sentiment, playerId) {
+  state.feedback.push({ sentiment, playerId, pickIndex: state.picks.length, roster: draftedPlayersForTeam(state.settings.userSlot).map((player) => player.id), observedAt: new Date().toISOString(), settings: { teams: state.settings.teams, slot: state.settings.userSlot, preset: state.settings.preset } });
+  saveState();
+  showToast(sentiment === "agree" ? "Recommendation feedback saved" : "Preference noted for model review");
+}
+
+function draftReport() {
+  const rosters = allRosters();
+  return {
+    schemaVersion: 2,
+    generatedAt: new Date().toISOString(),
+    scoring: "PPR",
+    settings: state.settings,
+    leagueImport: state.leagueImport,
+    picks: state.picks,
+    keepers: state.keepers,
+    tradedPicks: state.tradedPicks,
+    opponents: state.opponentBeliefs,
+    teams: rosters.map((roster, team) => ({ team, grade: rosterGrade(roster), evaluation: evaluateRoster(roster, state.settings, rosters), players: roster.map((player) => ({ id: player.id, name: player.name, position: player.position, team: player.team, projection: player.projection })) })),
+    feedback: state.feedback
+  };
+}
+
+function exportDraftReport() {
+  const blob = new Blob([JSON.stringify(draftReport(), null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `war-room-ppr-draft-${new Date().toISOString().slice(0, 10)}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 0);
+}
+
+async function copyShareLink() {
+  const share = { settings: state.settings, keepers: state.keepers, tradedPicks: state.tradedPicks };
+  const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(share))));
+  const url = new URL(location.href);
+  url.searchParams.set("room", encoded);
+  await navigator.clipboard.writeText(url.toString());
+  showToast("Shareable room configuration copied");
+}
+
+function runDraftBacktest() {
+  const report = backtestCompletedDraft({ players: dataset.players, picks: state.picks, rosters: allRosters(), settings: state.settings });
+  const coverage = Math.round(report.outcomeCoverage * 100);
+  elements.compareContent.innerHTML = `<div class="comparison-card"><p class="eyebrow">Historical evaluation</p><h3>${report.status === "exploratory" ? "Exploratory backtest" : "More outcomes needed"}</h3><div class="comparison-metrics"><div><span>Outcome coverage</span><strong>${coverage}%</strong></div><div><span>Recommendation regret</span><strong>${report.recommendationRegret?.toFixed(1) ?? "—"}</strong></div><div><span>Projection MAE</span><strong>${report.projectionCalibrationMae?.toFixed(1) ?? "—"}</strong></div><div><span>Legal lineups</span><strong>${Math.round(report.legalLineupRate * 100)}%</strong></div></div><p>${escapeHtml(report.limitation)}</p><div class="grade-explain">${report.segments.map((segment) => `<span>Slot ${segment.draftSlot}: ${segment.actualWeeklyPpr.toFixed(1)} actual PPR/wk · ${Math.round(segment.playoffProbability * 100)}% playoff · ${Math.round(segment.championshipProbability * 100)}% title</span>`).join("")}</div></div>`;
+  elements.compareDialog.showModal();
+}
+
 elements.searchInput.addEventListener("input", () => { syncBoardUrl(); renderBoard(); });
 elements.undoButton.addEventListener("click", undo);
 elements.settingsButton.addEventListener("click", openSetup);
@@ -495,6 +875,12 @@ elements.simulateButton.addEventListener("click", runToUserPick);
 elements.fullSimButton.addEventListener("click", simulateFullDraft);
 elements.viewLeagueButton.addEventListener("click", openLeagueResults);
 elements.closeLeagueButton.addEventListener("click", () => elements.leagueDialog.close());
+elements.closeCompareButton.addEventListener("click", () => elements.compareDialog.close());
+elements.compareButton.addEventListener("click", () => openComparison());
+elements.importSleeperButton.addEventListener("click", importSleeperLeague);
+elements.exportDraftButton.addEventListener("click", exportDraftReport);
+elements.shareDraftButton.addEventListener("click", () => copyShareLink().catch(() => showToast("Copy failed; use the address bar link")));
+elements.runBacktestButton.addEventListener("click", runDraftBacktest);
 elements.teamCount.addEventListener("change", () => populateSlots(Number(elements.userSlot.value)));
 elements.newDraftButton.addEventListener("click", startNewDraft);
 elements.projectionFile.addEventListener("change", async (event) => {
@@ -520,6 +906,13 @@ try {
   } catch { /* The daily live snapshot is optional. */ }
   state.picks = state.picks.filter((pick) => dataset.players.some((player) => player.id === pick.playerId));
   const initialParams = new URL(location.href).searchParams;
+  if (initialParams.get("room")) {
+    try {
+      const shared = JSON.parse(decodeURIComponent(escape(atob(initialParams.get("room")))));
+      const settings = normalizeLeagueSettings({ ...state.settings, ...shared.settings });
+      state = { ...state, settings, picks: [], cursor: 0, keepers: (shared.keepers || []).filter((keeper) => dataset.players.some((player) => player.id === keeper.playerId)), tradedPicks: shared.tradedPicks || {}, opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot), simulationSeed: Math.floor(Math.random() * 2 ** 31) };
+    } catch { showToast("Shared room configuration was invalid"); }
+  }
   activePosition = POSITIONS.includes((initialParams.get("pos") || "").toUpperCase()) ? initialParams.get("pos").toUpperCase() : "ALL";
   elements.searchInput.value = initialParams.get("q") || "";
   if (!state.model?.data) {

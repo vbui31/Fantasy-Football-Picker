@@ -3,9 +3,16 @@ const POSITION_DEPTH = { QB: 1.15, RB: 3.2, WR: 3.5, TE: 1.25, K: 1, DST: 1 };
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 const round1 = (value) => Math.round(value * 10) / 10;
 
-export function replacementRanks(teamCount, rounds = 15) {
+export function replacementRanks(teamCount, rounds = 15, rosterSlots = null, tePremium = 0) {
   const benchFactor = clamp((rounds - 10) / 5, 0.35, 1.4);
-  const depth = {
+  const depth = rosterSlots ? {
+    QB: (rosterSlots.QB || 0) + (rosterSlots.SUPERFLEX || 0) * .88 + .15 * benchFactor,
+    RB: (rosterSlots.RB || 0) + (rosterSlots.FLEX || 0) * .48 + (rosterSlots.SUPERFLEX || 0) * .08 + .6 * benchFactor,
+    WR: (rosterSlots.WR || 0) + (rosterSlots.FLEX || 0) * .45 + (rosterSlots.SUPERFLEX || 0) * .04 + .7 * benchFactor,
+    TE: (rosterSlots.TE || 0) + (rosterSlots.FLEX || 0) * .07 + .25 * benchFactor + Math.min(.35, Number(tePremium) * .2),
+    K: rosterSlots.K || 0,
+    DST: rosterSlots.DST || 0
+  } : {
     QB: 1 + .15 * benchFactor,
     RB: 2.6 + .6 * benchFactor,
     WR: 2.8 + .7 * benchFactor,
@@ -71,8 +78,8 @@ function softTiers(players, maximumTiers = 9) {
   }
 }
 
-export function enrichPlayerModel(players, { teams = 10, rounds = 15 } = {}) {
-  const ranks = replacementRanks(teams, rounds);
+export function enrichPlayerModel(players, { teams = 10, rounds = 15, rosterSlots = null, tePremium = 0 } = {}) {
+  const ranks = replacementRanks(teams, rounds, rosterSlots, tePremium);
   for (const position of Object.keys(ranks)) {
     const positionPlayers = players
       .filter((player) => player.position === position && Number.isFinite(player.projection))
@@ -175,6 +182,17 @@ function marketTrendImpact(player) {
   const net = adds - drops;
   const impact = Math.max(-4, Math.min(4, Math.sign(net) * Math.log10(Math.abs(net) + 1)));
   return { impact, detail: `${adds} adds and ${drops} drops over 24 hours are treated as a weak market signal.` };
+}
+
+function opportunityContextImpact(player) {
+  const depth = Number(player.depthOrder);
+  const practice = String(player.practiceParticipation || "").toLowerCase();
+  let impact = 0;
+  const details = [];
+  if (depth === 1) { impact += 2.5; details.push("first-team depth-chart role"); }
+  else if (depth >= 3 && ["RB", "WR", "TE", "QB"].includes(player.position)) { impact -= 3; details.push(`No. ${depth} depth-chart role`); }
+  if (/full/.test(practice)) { impact += 1; details.push("full practice participation"); }
+  return { impact, detail: details.length ? `${details.join(" and ")} adjust opportunity within a bounded range.` : "No verified role change is available; news timestamps alone do not imply sentiment." };
 }
 
 function strategicWindow(player, counts, round, totalRounds) {
@@ -309,6 +327,7 @@ export function scoreCandidate(player, { roster, round, currentPickIndex, nextPi
   const live = liveAvailabilityImpact(player);
   const history = historicalContextImpact(player);
   const trend = marketTrendImpact(player);
+  const opportunity = opportunityContextImpact(player);
   const availability = availabilityAtNextPick(player, currentPickIndex, nextPickIndex);
   const tierRemaining = availablePlayers.filter((candidate) => candidate.position === player.position && candidate.tier === player.tier).length;
   const tierImpact = Math.min(16, (player.tierDropoff || 0) * .8) + (tierRemaining <= 2 ? 5 : 0);
@@ -318,7 +337,7 @@ export function scoreCandidate(player, { roster, round, currentPickIndex, nextPi
   const marketPick = Number.isFinite(player.adp) ? player.adp : Number.isFinite(player.expertRank) ? player.expertRank : player.sourceRank;
   const reach = Number.isFinite(marketPick) ? marketPick - (currentPickIndex + 1) : 0;
   const marketImpact = reach > 14 ? -Math.min(14, (reach - 14) * .16) : reach < 2 ? 3 : 0;
-  const score = player.vbd + fit.impact + constraint.impact + evidence.impact + window.impact + upside.impact + portfolio.impact + live.impact + history.impact + trend.impact + tierImpact + urgencyImpact + runImpact + marketImpact;
+  const score = player.vbd + fit.impact + constraint.impact + evidence.impact + window.impact + upside.impact + portfolio.impact + live.impact + history.impact + trend.impact + opportunity.impact + tierImpact + urgencyImpact + runImpact + marketImpact;
   const factors = [
     { label: "Value", impact: player.vbd, detail: `${player.vbd >= 0 ? "+" : ""}${player.vbd.toFixed(1)} points versus ${player.position}${player.replacementRank}.` },
     { label: "Roster fit", impact: fit.impact, detail: fit.detail },
@@ -333,6 +352,7 @@ export function scoreCandidate(player, { roster, round, currentPickIndex, nextPi
   if (live.impact) factors.push({ label: "Live availability", impact: live.impact, detail: live.detail });
   if (history.impact) factors.push({ label: "Historical check", impact: history.impact, detail: history.detail });
   if (trend.impact) factors.push({ label: "Market trend", impact: trend.impact, detail: trend.detail });
+  if (opportunity.impact) factors.push({ label: "Verified role", impact: opportunity.impact, detail: opportunity.detail });
   if (runImpact) factors.push({ label: "Position run", impact: runImpact, detail: "Recent picks increase the chance this tier is depleted before the next turn without forcing a panic pick." });
   if (marketImpact < 0) factors.push({ label: "Reach", impact: marketImpact, detail: "Market position suggests a later selection may be possible." });
   return { score, availability, hasNextPick, tierRemaining, reliability: evidence.reliability, phase: evidence.phase, utilityProjection: evidence.utilityProjection, factors: factors.sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact)) };

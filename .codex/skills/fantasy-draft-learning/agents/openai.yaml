@@ -1,0 +1,6 @@
+interface:
+  display_name: "Fantasy Draft Learning"
+  short_description: "Backtest and promote safer draft improvements"
+  default_prompt: "Use $fantasy-draft-learning to evaluate new draft evidence and recommend whether the production model should change."
+policy:
+  allow_implicit_invocation: true
