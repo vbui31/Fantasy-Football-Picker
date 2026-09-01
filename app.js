@@ -3,6 +3,7 @@ import { buildProjectionDataset, normalizedName, parseCsv } from "./ffanalytics-
 import { backtestCompletedDraft, createOpponentBeliefs, dominantOpponentStyle, evaluateRoster, expectedOpponentBias, normalizeLeagueSettings, runMonteCarloRestOfDraft, updateOpponentBelief } from "./draft-intelligence.js";
 import { createDraftId, getDraftLogs, historicalCalibration, putDraftLog, settingsFingerprint } from "./draft-audit.js";
 import { applyProviderProjections, loadLearningProfile, providerRosterGrades, saveLearningProfile, updateLearningFromDraft } from "./provider-intelligence.js";
+import { parseTradedPicks } from "./draft-setup.js";
 
 const POSITIONS = ["ALL", "RB", "WR", "QB", "TE", "FLEX", "K", "DST"];
 const OPPONENT_PROFILE = {
@@ -58,8 +59,15 @@ function loadState() {
 }
 
 function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  elements.saveState.innerHTML = "<i></i> Saved locally";
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    elements.saveState.innerHTML = "<i></i> Saved locally";
+    return true;
+  } catch (error) {
+    console.warn("Draft state could not be saved locally", error);
+    elements.saveState.innerHTML = "<i></i> Running unsaved";
+    return false;
+  }
 }
 
 function teamName(index) { return index === state.settings.userSlot ? `Your team · ${index + 1}` : `Team ${index + 1}`; }
@@ -525,7 +533,7 @@ function draftPlayer(playerId, isAuto = false) {
     showToast(`${player.name} ${price ? `won for $${price}` : "drafted"} by ${teamName(context.team)}`);
     if (state.settings.autoOpponents && !isComplete()) setTimeout(runToUserPick, 180);
   }
-  if (isComplete() || state.picks.length % state.settings.teams === 0) void logCurrentDraft(isComplete() ? "complete" : "in-progress");
+  if (isComplete() || state.picks.length % state.settings.teams === 0) logCurrentDraftInBackground(isComplete() ? "complete" : "in-progress");
 }
 
 function autoPick() {
@@ -642,20 +650,6 @@ function parseManualKeepers(text) {
   return keepers;
 }
 
-function parseTradedPicks(text) {
-  const traded = {};
-  const teams = Number(elements.teamCount.value);
-  const maxPicks = teams * Number(elements.rounds.value);
-  for (const line of String(text || "").split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
-    const match = line.match(/^(\d+)\s*:\s*Team\s+(\d+)$/i);
-    if (!match) continue;
-    const overall = Number(match[1]);
-    const team = Number(match[2]) - 1;
-    if (overall >= 1 && overall <= maxPicks && team >= 0 && team < teams) traded[overall] = team;
-  }
-  return traded;
-}
-
 async function importSleeperLeague() {
   const leagueId = elements.sleeperLeagueId.value.trim();
   if (!/^\d+$/.test(leagueId)) { elements.sleeperImportStatus.textContent = "Enter a numeric Sleeper league ID."; return; }
@@ -729,10 +723,14 @@ function openSetup() {
 
 async function startNewDraft(event) {
   event.preventDefault();
+  if (elements.newDraftButton.disabled) return;
+  elements.newDraftButton.disabled = true;
+  elements.newDraftButton.textContent = "Starting…";
   simulationNonce++;
   isSimulating = false;
-  await logCurrentDraft(isComplete() ? "complete" : "abandoned");
-  const settings = normalizeLeagueSettings({
+  try {
+    const previousStatus = isComplete() ? "complete" : "abandoned";
+    const settings = normalizeLeagueSettings({
       teams: Number(elements.teamCount.value),
       userSlot: Number(elements.userSlot.value),
       rounds: Number(elements.roundCount.value),
@@ -743,30 +741,42 @@ async function startNewDraft(event) {
       draftFormat: elements.draftFormat.value,
       auctionBudget: Number(elements.auctionBudget.value),
       preset: elements.draftPreset.value
-  });
-  state = {
-    version: 3,
-    draftId: createDraftId(),
-    startedAt: new Date().toISOString(),
-    settings,
-    picks: [],
-    cursor: 0,
-    keepers: parseManualKeepers(elements.keepersInput.value),
-    tradedPicks: parseTradedPicks(elements.tradedPicksInput.value),
-    model: state.model,
-    opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot),
-    feedback: [],
-    leagueImport: state.leagueImport,
-    simulationSeed: Math.floor(Math.random() * 2 ** 31)
-  };
-  comparisonSelection.clear();
-  monteCarlo = { key: null, results: null, running: false };
-  recalculateModel();
-  saveState();
-  elements.setupDialog.close();
-  renderAll();
-  showToast("New draft room started");
-  if (state.settings.autoOpponents && state.settings.userSlot > 0) setTimeout(runToUserPick, 250);
+    });
+    const nextState = {
+      version: 3,
+      draftId: createDraftId(),
+      startedAt: new Date().toISOString(),
+      settings,
+      picks: [],
+      cursor: 0,
+      keepers: parseManualKeepers(elements.keepersInput.value),
+      tradedPicks: parseTradedPicks(elements.tradedPicksInput.value, settings.teams, settings.rounds),
+      model: state.model,
+      opponentBeliefs: createOpponentBeliefs(settings.teams, settings.userSlot),
+      feedback: [],
+      leagueImport: state.leagueImport,
+      simulationSeed: Math.floor(Math.random() * 2 ** 31)
+    };
+
+    try { await logCurrentDraft(previousStatus); }
+    catch (error) { console.warn("Previous draft could not be added to the draft log", error); }
+
+    state = nextState;
+    comparisonSelection.clear();
+    monteCarlo = { key: null, results: null, running: false };
+    recalculateModel();
+    saveState();
+    elements.setupDialog.close();
+    renderAll();
+    showToast("New draft room started");
+    if (state.settings.autoOpponents && state.settings.userSlot > 0) setTimeout(runToUserPick, 250);
+  } catch (error) {
+    console.error("New draft could not be started", error);
+    showToast("Could not start a new draft. Check the setup values and try again.");
+  } finally {
+    elements.newDraftButton.disabled = false;
+    elements.newDraftButton.textContent = "Start New Draft";
+  }
 }
 
 function modelFromProjectionText(text, fileName) {
@@ -823,7 +833,7 @@ function syncBoardUrl() {
   if (query) url.searchParams.set("q", query); else url.searchParams.delete("q");
   history.replaceState(null, "", url);
 }
-function openLeagueResults() { renderLeagueResults(); elements.leagueDialog.showModal(); void logCurrentDraft(isComplete() ? "complete" : "in-progress"); }
+function openLeagueResults() { renderLeagueResults(); elements.leagueDialog.showModal(); logCurrentDraftInBackground(isComplete() ? "complete" : "in-progress"); }
 
 function toggleComparison(playerId) {
   if (comparisonSelection.has(playerId)) comparisonSelection.delete(playerId);
@@ -918,6 +928,10 @@ async function logCurrentDraft(status) {
   return entry;
 }
 
+function logCurrentDraftInBackground(status) {
+  void logCurrentDraft(status).catch((error) => console.warn("Draft log update failed", error));
+}
+
 async function openDraftLog() {
   await logCurrentDraft(isComplete() ? "complete" : "in-progress");
   draftHistory = await getDraftLogs();
@@ -973,10 +987,10 @@ elements.compareButton.addEventListener("click", () => openComparison());
 elements.importSleeperButton.addEventListener("click", importSleeperLeague);
 elements.exportDraftButton.addEventListener("click", exportDraftReport);
 elements.shareDraftButton.addEventListener("click", () => copyShareLink().catch(() => showToast("Copy failed; use the address bar link")));
-elements.draftLogButton.addEventListener("click", () => void openDraftLog());
+elements.draftLogButton.addEventListener("click", () => void openDraftLog().catch((error) => { console.warn("Draft log could not be opened", error); showToast("Draft log is unavailable on this device"); }));
 elements.runBacktestButton.addEventListener("click", runDraftBacktest);
 elements.teamCount.addEventListener("change", () => populateSlots(Number(elements.userSlot.value)));
-elements.newDraftButton.addEventListener("click", startNewDraft);
+elements.setupForm.addEventListener("submit", startNewDraft);
 elements.projectionFile.addEventListener("change", async (event) => {
   const file = event.target.files?.[0];
   if (!file) return;

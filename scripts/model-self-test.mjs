@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { availabilityAtNextPick, enrichPlayerModel, evidenceProfile, missingStarterSlots, nextPickIndexForTeam, opponentStrategyForTeam, opponentStrategyImpact, replacementRanks, scoreCandidate } from "../draft-model.js";
 import { buildProjectionDataset, parseCsv } from "../ffanalytics-data.js";
 import { createOpponentBeliefs, dominantOpponentStyle, evaluateRoster, normalizeLeagueSettings, runMonteCarloRestOfDraft, updateOpponentBelief } from "../draft-intelligence.js";
+import { parseTradedPicks } from "../draft-setup.js";
 import { historicalCalibration, settingsFingerprint } from "../draft-audit.js";
 import { applyProviderProjections, DEFAULT_LEARNING_PROFILE, providerRosterGrades, updateLearningFromDraft } from "../provider-intelligence.js";
 import { normalizeFantasyProsProjection, normalizeSportsDataProjection } from "../provider-normalization.js";
@@ -67,6 +68,8 @@ const lateQb = opponentStrategyImpact({ position: "QB", tier: 1 }, { roster: [],
 assert.ok(lateQb.impact < 0, "Late QB opponents should resist early quarterbacks");
 
 const pprSettings = normalizeLeagueSettings({ teams: 10, rounds: 15, rosterSlots: { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 2, SUPERFLEX: 0, K: 1, DST: 1 } });
+assert.deepEqual(parseTradedPicks("12: Team 3\n31: Team 8", 10, 15), { 12: 2, 31: 7 });
+assert.deepEqual(parseTradedPicks("0: Team 1\n151: Team 2\n12: Team 11\nbad input", 10, 15), {});
 assert.equal(pprSettings.scoring.reception, 1, "the production scoring contract must remain full PPR");
 const superflexSettings = normalizeLeagueSettings({ teams: 10, rounds: 16, rosterSlots: { ...pprSettings.rosterSlots, SUPERFLEX: 1 } });
 assert.equal(superflexSettings.superflex, true);
