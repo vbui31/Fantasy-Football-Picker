@@ -3,7 +3,8 @@ import { buildProjectionDataset, normalizedName, parseCsv } from "./ffanalytics-
 import { backtestCompletedDraft, createOpponentBeliefs, dominantOpponentStyle, evaluateRoster, expectedOpponentBias, normalizeLeagueSettings, runMonteCarloRestOfDraft, updateOpponentBelief } from "./draft-intelligence.js";
 import { createDraftId, getDraftLogs, historicalCalibration, putDraftLog, settingsFingerprint } from "./draft-audit.js";
 import { applyProviderProjections, loadLearningProfile, providerRosterGrades, saveLearningProfile, updateLearningFromDraft } from "./provider-intelligence.js";
-import { parseTradedPicks } from "./draft-setup.js";\nimport { evaluatePlayer, evaluateTrade, suggestTrades } from "./trade-engine.js";
+import { parseTradedPicks } from "./draft-setup.js";
+import { evaluatePlayer, evaluateTrade, suggestTrades } from "./trade-engine.js";
 
 const POSITIONS = ["ALL", "RB", "WR", "QB", "TE", "FLEX", "K", "DST"];
 const OPPONENT_PROFILE = {
@@ -39,7 +40,9 @@ let draftHistory = [];
 let providerSnapshot = null;
 let providerSummary = { matchedPlayers: 0, usableProviders: [], influence: 0 };
 let learningProfile = loadLearningProfile();
-let state = loadState();\nlet tradeLeague = null;\nlet tradeSelection = { give: new Set(), receive: new Set() };
+let state = loadState();
+let tradeLeague = null;
+let tradeSelection = { give: new Set(), receive: new Set() };
 
 function defaultState() {
   const settings = normalizeLeagueSettings({ teams: 10, userSlot: 5, rounds: 15, autoOpponents: true, simulationPace: 220, preset: "balanced" });
@@ -812,7 +815,9 @@ function escapeHtml(value = "") {
   return String(value).replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
 }
 
-document.addEventListener("click", (event) => {\n  const tradePick = event.target.closest("[data-trade-player]");\n  if (tradePick) { const side = tradePick.dataset.tradeSide; const id = tradePick.dataset.tradePlayer; if (tradePick.checked) tradeSelection[side].add(id); else tradeSelection[side].delete(id); renderTradeEvaluation(); }
+document.addEventListener("click", (event) => {
+  const tradePick = event.target.closest("[data-trade-player]");
+  if (tradePick) { const side = tradePick.dataset.tradeSide; const id = tradePick.dataset.tradePlayer; if (tradePick.checked) tradeSelection[side].add(id); else tradeSelection[side].delete(id); renderTradeEvaluation(); }
   const draftButton = event.target.closest("[data-draft]");
   if (draftButton) draftPlayer(draftButton.dataset.draft);
   const filterButton = event.target.closest("[data-position]");
@@ -1104,7 +1109,16 @@ elements.undoButton.addEventListener("click", undo);
 elements.settingsButton.addEventListener("click", openSetup);
 elements.simulateButton.addEventListener("click", runToUserPick);
 elements.fullSimButton.addEventListener("click", simulateFullDraft);
-elements.viewLeagueButton.addEventListener("click", openLeagueResults);\nelements.tradeAnalyzerButton.addEventListener("click", openTradeAnalyzer);\nelements.closeTradeButton.addEventListener("click", () => elements.tradeDialog.close());\nelements.loadTradeLeagueButton.addEventListener("click", () => void loadTradeLeague());\nelements.tradeUserRoster.addEventListener("change", () => { localStorage.setItem("war-room-trade-user-roster", elements.tradeUserRoster.value); renderTradeOpponentOptions(); });\nelements.tradeOpponentRoster.addEventListener("change", () => { tradeSelection.receive.clear(); renderTradeBuilder(); renderTradeEvaluation(); });\nelements.tradeGiveSearch.addEventListener("input", renderTradeBuilder);\nelements.tradeReceiveSearch.addEventListener("input", renderTradeBuilder);\nelements.evaluateTradeButton.addEventListener("click", renderTradeEvaluation);\nelements.generateTradeSuggestionsButton.addEventListener("click", generateTradeIdeas);
+elements.viewLeagueButton.addEventListener("click", openLeagueResults);
+elements.tradeAnalyzerButton.addEventListener("click", openTradeAnalyzer);
+elements.closeTradeButton.addEventListener("click", () => elements.tradeDialog.close());
+elements.loadTradeLeagueButton.addEventListener("click", () => void loadTradeLeague());
+elements.tradeUserRoster.addEventListener("change", () => { localStorage.setItem("war-room-trade-user-roster", elements.tradeUserRoster.value); renderTradeOpponentOptions(); });
+elements.tradeOpponentRoster.addEventListener("change", () => { tradeSelection.receive.clear(); renderTradeBuilder(); renderTradeEvaluation(); });
+elements.tradeGiveSearch.addEventListener("input", renderTradeBuilder);
+elements.tradeReceiveSearch.addEventListener("input", renderTradeBuilder);
+elements.evaluateTradeButton.addEventListener("click", renderTradeEvaluation);
+elements.generateTradeSuggestionsButton.addEventListener("click", generateTradeIdeas);
 elements.closeLeagueButton.addEventListener("click", () => elements.leagueDialog.close());
 elements.closeCompareButton.addEventListener("click", () => elements.compareDialog.close());
 elements.compareButton.addEventListener("click", () => openComparison());
