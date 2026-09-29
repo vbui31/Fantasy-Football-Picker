@@ -144,8 +144,8 @@ const tradeContextFixture = {
     NO: { offense: { pointsPerGame: 22, passRate: .58, offensiveTouchdownsPerGame: 2.2 }, defense: { pointsAllowedPerGame: 25 }, remainingSchedule: [{ week: 5, opponent: "TB" }] }
   },
   players: {
-    "trade-rb": { depthChartOrder: 1, currentSeason: { games: 4, fantasyPointsPpr: 88, carries: 72, targets: 18, receptions: 15 }, trendingAdds: 400, trendingDrops: 30 },
-    "trade-wr": { depthChartOrder: 1, currentSeason: { games: 4, fantasyPointsPpr: 58, targets: 31, receptions: 20, targetShare: .24 }, trendingAdds: 40, trendingDrops: 120 }
+    "trade-rb": { depthChartOrder: 1, currentSeason: { games: 4, fantasyPointsPpr: 88, carries: 72, targets: 18, receptions: 15 }, weekly: [{ week: 1, fantasyPointsPpr: 17 }, { week: 2, fantasyPointsPpr: 20 }, { week: 3, fantasyPointsPpr: 24 }, { week: 4, fantasyPointsPpr: 27 }], trendingAdds: 400, trendingDrops: 30 },
+    "trade-wr": { depthChartOrder: 1, currentSeason: { games: 4, fantasyPointsPpr: 58, targets: 31, receptions: 20, targetShare: .24 }, weekly: [{ week: 1, fantasyPointsPpr: 20 }, { week: 2, fantasyPointsPpr: 16 }, { week: 3, fantasyPointsPpr: 12 }, { week: 4, fantasyPointsPpr: 10 }], trendingAdds: 40, trendingDrops: 120 }
   }
 };
 const tradeRb = { id: "trade-rb", name: "Trade Runner", position: "RB", team: "ATL", projection: 285, age: 24, yearsExperience: 2, depthOrder: 1 };
@@ -154,8 +154,10 @@ const tradeBench = { id: "trade-bench", name: "Bench Receiver", position: "WR", 
 const rbTradeValue = evaluatePlayer(tradeRb, tradeContextFixture);
 assert.ok(rbTradeValue.value > evaluatePlayer(tradeWr, tradeContextFixture).value, "current usage and strong offense should lift rest-of-season trade value");
 assert.equal(rbTradeValue.coverageAvailable, false, "coverage must not be invented when the source feed lacks coverage profiles");
-const tradeResult = evaluateTrade({ give: [tradeWr, tradeBench], receive: [tradeRb], myRoster: [tradeWr, tradeBench], context: tradeContextFixture, settings: pprSettings });
+const tradeResult = evaluateTrade({ give: [tradeWr, tradeBench], receive: [tradeRb], myRoster: [tradeWr, tradeBench], opponentRoster: [tradeRb], context: tradeContextFixture, settings: pprSettings });
 assert.ok(Number.isFinite(tradeResult.adjustedDelta) && tradeResult.fairness >= 0 && tradeResult.fairness <= 100, "trade evaluation must return bounded fairness and finite roster-adjusted value");
+assert.ok(tradeResult.acceptanceScore >= 0 && tradeResult.acceptanceScore <= 100, "two-sided trade analysis must return bounded opponent acceptability");
+assert.ok(rbTradeValue.trend > 50 && evaluatePlayer(tradeWr, tradeContextFixture).trend < 50, "recent weekly form should distinguish improving from declining scoring trends");
 const tradeIdeas = suggestTrades({ myRoster: [tradeWr, tradeBench], opponents: [{ id: 2, name: "Opponent", roster: [tradeRb] }], context: tradeContextFixture, settings: pprSettings });
 assert.ok(Array.isArray(tradeIdeas), "trade suggestion engine must return a package list");
 
