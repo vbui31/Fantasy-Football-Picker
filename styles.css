@@ -293,3 +293,50 @@ dialog::backdrop { background: rgba(24, 15, 32, .62); backdrop-filter: blur(3px)
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+
+/* Trade analyzer */
+.trade-dialog { width: min(1180px, 96vw); max-height: 92vh; border: 0; border-radius: 22px; padding: 0; background: var(--panel, #fff); color: inherit; }
+.trade-dialog::backdrop { background: rgba(15, 11, 24, .66); backdrop-filter: blur(4px); }
+.trade-dialog-inner { padding: 24px; display: grid; gap: 20px; }
+.trade-league-bar { display: grid; grid-template-columns: minmax(220px, 1.2fr) auto minmax(180px, .8fr) minmax(220px, 1fr); gap: 12px; align-items: end; }
+.trade-league-bar label, .trade-side { display: grid; gap: 8px; }
+.trade-league-bar input, .trade-league-bar select, .trade-side input, .trade-side select { width: 100%; border: 1px solid var(--line, #d9d2e3); border-radius: 10px; padding: 10px 12px; background: #fff; color: #1f1730; }
+#tradeDataFreshness { font-size: .82rem; color: var(--muted, #6e657a); align-self: center; }
+.trade-builder { display: grid; grid-template-columns: minmax(0, 1fr) 220px minmax(0, 1fr); gap: 16px; align-items: stretch; }
+.trade-side { border: 1px solid var(--line, #e2dce8); border-radius: 16px; padding: 16px; background: rgba(70, 29, 124, .025); min-height: 360px; }
+.trade-center { display: grid; align-content: center; gap: 14px; }
+.trade-verdict { border: 1px solid var(--line, #ded7e8); border-radius: 16px; padding: 18px; text-align: center; display: grid; gap: 6px; background: #faf8fc; }
+.trade-verdict strong { font-size: 1.25rem; }
+.trade-verdict.positive { border-color: #91c9a8; background: #f3fbf6; }
+.trade-verdict.negative { border-color: #d8a0a0; background: #fff6f6; }
+.trade-player-list { display: grid; gap: 8px; max-height: 320px; overflow: auto; padding-right: 4px; }
+.trade-player-option { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--line, #e2dce8); border-radius: 12px; padding: 10px; background: #fff; cursor: pointer; }
+.trade-player-option input { width: auto; }
+.trade-player-option small { color: var(--muted, #6e657a); }
+.trade-value-pill { font-weight: 800; font-variant-numeric: tabular-nums; background: #f0e9f8; border-radius: 999px; padding: 4px 8px; }
+.trade-analysis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.trade-metric, .trade-player-card, .trade-suggestion { border: 1px solid var(--line, #e2dce8); border-radius: 14px; padding: 14px; background: #fff; }
+.trade-metric span, .trade-player-card small { display: block; color: var(--muted, #6e657a); font-size: .78rem; }
+.trade-metric strong { display: block; margin-top: 4px; font-size: 1.3rem; }
+.trade-factor-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+.trade-player-card h4 { margin: 0 0 4px; }
+.trade-factor { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding-top: 8px; font-size: .82rem; }
+.trade-factor p { grid-column: 1 / -1; margin: 0; color: var(--muted, #6e657a); }
+.trade-suggestions { display: grid; gap: 12px; }
+#tradeSuggestions { display: grid; gap: 10px; }
+.trade-suggestion { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; align-items: center; }
+.trade-suggestion p { margin: 0; color: var(--muted, #6e657a); }
+.trade-suggestion .trade-package { font-weight: 750; }
+.trade-suggestion .trade-score { text-align: right; }
+.trade-empty { padding: 24px; text-align: center; color: var(--muted, #6e657a); border: 1px dashed var(--line, #ded7e8); border-radius: 12px; }
+
+@media (max-width: 900px) {
+  .trade-league-bar, .trade-builder, .trade-analysis { grid-template-columns: 1fr; }
+  .trade-center { order: 3; }
+  .trade-analysis { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 560px) {
+  .trade-dialog-inner { padding: 16px; }
+  .trade-analysis { grid-template-columns: 1fr; }
+}

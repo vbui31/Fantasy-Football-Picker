@@ -4,6 +4,7 @@ import { backtestCompletedDraft, createOpponentBeliefs, dominantOpponentStyle, e
 import { createDraftId, getDraftLogs, historicalCalibration, putDraftLog, settingsFingerprint } from "./draft-audit.js";
 import { applyProviderProjections, loadLearningProfile, providerRosterGrades, saveLearningProfile, updateLearningFromDraft } from "./provider-intelligence.js";
 import { parseTradedPicks } from "./draft-setup.js";
+import { evaluatePlayer, evaluateTrade, suggestTrades } from "./trade-engine.js";
 
 const POSITIONS = ["ALL", "RB", "WR", "QB", "TE", "FLEX", "K", "DST"];
 const OPPONENT_PROFILE = {
@@ -24,7 +25,7 @@ const elements = Object.fromEntries([
   "scarcityPanel", "compareDialog", "closeCompareButton", "compareContent", "draftPreset", "draftFormat", "scoringFormat",
   "slotQB", "slotRB", "slotWR", "slotTE", "slotFlex", "slotSuperflex", "slotK", "slotDST", "tePremium", "auctionBudget",
   "sleeperLeagueId", "importSleeperButton", "sleeperImportStatus", "keepersInput", "tradedPicksInput", "exportDraftButton",
-  "shareDraftButton", "runBacktestButton", "draftLogButton", "providerAudit"
+  "shareDraftButton", "runBacktestButton", "draftLogButton", "providerAudit", "tradeAnalyzerButton", "tradeDialog", "closeTradeButton", "tradeLeagueId", "loadTradeLeagueButton", "tradeUserRoster", "tradeOpponentRoster", "tradeGiveSearch", "tradeReceiveSearch", "tradeGiveList", "tradeReceiveList", "evaluateTradeButton", "tradeVerdict", "tradeAnalysis", "generateTradeSuggestionsButton", "tradeSuggestions", "tradeDataFreshness"
 ].map((id) => [id, document.getElementById(id)]));
 
 let dataset;
@@ -40,6 +41,8 @@ let providerSnapshot = null;
 let providerSummary = { matchedPlayers: 0, usableProviders: [], influence: 0 };
 let learningProfile = loadLearningProfile();
 let state = loadState();
+let tradeLeague = null;
+let tradeSelection = { give: new Set(), receive: new Set() };
 
 function defaultState() {
   const settings = normalizeLeagueSettings({ teams: 10, userSlot: 5, rounds: 15, autoOpponents: true, simulationPace: 220, preset: "balanced" });
@@ -813,6 +816,8 @@ function escapeHtml(value = "") {
 }
 
 document.addEventListener("click", (event) => {
+  const tradePick = event.target.closest("[data-trade-player]");
+  if (tradePick) { const side = tradePick.dataset.tradeSide; const id = tradePick.dataset.tradePlayer; if (tradePick.checked) tradeSelection[side].add(id); else tradeSelection[side].delete(id); renderTradeEvaluation(); }
   const draftButton = event.target.closest("[data-draft]");
   if (draftButton) draftPlayer(draftButton.dataset.draft);
   const filterButton = event.target.closest("[data-position]");
@@ -833,6 +838,130 @@ function syncBoardUrl() {
   if (query) url.searchParams.set("q", query); else url.searchParams.delete("q");
   history.replaceState(null, "", url);
 }
+function tradeContext() {
+  return liveContext || { generatedAt: null, season: { season: 2026, week: 1 }, players: {}, teams: {} };
+}
+
+function playerById(id) { return dataset.players.find((player) => player.id === String(id)); }
+
+function tradeRosterRecord(id) {
+  return tradeLeague?.rosters?.find((roster) => String(roster.roster_id) === String(id)) || null;
+}
+
+function tradeRosterPlayers(id) {
+  return (tradeRosterRecord(id)?.players || []).map(playerById).filter(Boolean);
+}
+
+function tradeRosterName(id) {
+  const roster = tradeRosterRecord(id);
+  if (!roster) return "Unknown roster";
+  const user = tradeLeague.usersById?.[roster.owner_id];
+  return user?.display_name || user?.username || "Team " + roster.roster_id;
+}
+
+function renderTradeSelectors() {
+  if (!tradeLeague) return;
+  const options = tradeLeague.rosters.map((roster) => '<option value="' + roster.roster_id + '">' + escapeHtml(tradeRosterName(roster.roster_id)) + '</option>').join("");
+  elements.tradeUserRoster.innerHTML = options;
+  const savedUser = localStorage.getItem("war-room-trade-user-roster");
+  if (savedUser && tradeRosterRecord(savedUser)) elements.tradeUserRoster.value = savedUser;
+  renderTradeOpponentOptions();
+}
+
+function renderTradeOpponentOptions() {
+  if (!tradeLeague) return;
+  const userId = elements.tradeUserRoster.value;
+  elements.tradeOpponentRoster.innerHTML = tradeLeague.rosters.filter((roster) => String(roster.roster_id) !== String(userId)).map((roster) => '<option value="' + roster.roster_id + '">' + escapeHtml(tradeRosterName(roster.roster_id)) + '</option>').join("");
+  tradeSelection = { give: new Set(), receive: new Set() };
+  renderTradeBuilder();
+}
+
+function tradePlayerOption(player, selected, side) {
+  const evaluation = evaluatePlayer(player, tradeContext());
+  const checked = selected.has(player.id) ? "checked" : "";
+  return '<label class="trade-player-option"><input type="checkbox" data-trade-side="' + side + '" data-trade-player="' + player.id + '" ' + checked + '><span><strong>' + escapeHtml(player.name) + '</strong><small>' + player.position + ' · ' + escapeHtml(player.team || "FA") + ' · ' + evaluation.weekly.toFixed(1) + ' ROS pts/wk</small></span><span class="trade-value-pill">' + evaluation.value.toFixed(0) + '</span></label>';
+}
+
+function renderTradeBuilder() {
+  if (!tradeLeague) {
+    elements.tradeGiveList.innerHTML = '<div class="trade-empty">Load a Sleeper league to analyze real rosters.</div>';
+    elements.tradeReceiveList.innerHTML = '<div class="trade-empty">Opponent rosters will appear here.</div>';
+    return;
+  }
+  const giveQuery = elements.tradeGiveSearch.value.trim().toLowerCase();
+  const receiveQuery = elements.tradeReceiveSearch.value.trim().toLowerCase();
+  const myRoster = tradeRosterPlayers(elements.tradeUserRoster.value).filter((player) => !giveQuery || (player.name + " " + player.team + " " + player.position).toLowerCase().includes(giveQuery));
+  const theirRoster = tradeRosterPlayers(elements.tradeOpponentRoster.value).filter((player) => !receiveQuery || (player.name + " " + player.team + " " + player.position).toLowerCase().includes(receiveQuery));
+  elements.tradeGiveList.innerHTML = myRoster.sort((a, b) => evaluatePlayer(b, tradeContext()).value - evaluatePlayer(a, tradeContext()).value).map((player) => tradePlayerOption(player, tradeSelection.give, "give")).join("") || '<div class="trade-empty">No matching players.</div>';
+  elements.tradeReceiveList.innerHTML = theirRoster.sort((a, b) => evaluatePlayer(b, tradeContext()).value - evaluatePlayer(a, tradeContext()).value).map((player) => tradePlayerOption(player, tradeSelection.receive, "receive")).join("") || '<div class="trade-empty">No matching players.</div>';
+}
+
+function tradeSelectedPlayers(side) {
+  return [...tradeSelection[side]].map(playerById).filter(Boolean);
+}
+
+function renderTradeEvaluation() {
+  const give = tradeSelectedPlayers("give");
+  const receive = tradeSelectedPlayers("receive");
+  if (!give.length || !receive.length) {
+    elements.tradeVerdict.className = "trade-verdict";
+    elements.tradeVerdict.innerHTML = "<strong>Select players</strong><span>Choose at least one player on both sides.</span>";
+    elements.tradeAnalysis.innerHTML = "";
+    return;
+  }
+  const myRoster = tradeRosterPlayers(elements.tradeUserRoster.value);
+  const analysis = evaluateTrade({ give, receive, myRoster, context: tradeContext(), settings: state.settings });
+  elements.tradeVerdict.className = "trade-verdict " + (analysis.adjustedDelta > 2 ? "positive" : analysis.adjustedDelta < -2 ? "negative" : "");
+  elements.tradeVerdict.innerHTML = "<strong>" + escapeHtml(analysis.verdict) + "</strong><span>" + (analysis.adjustedDelta >= 0 ? "+" : "") + analysis.adjustedDelta.toFixed(1) + " adjusted value · " + analysis.fairness + "% fairness</span>";
+  const playerCards = [...analysis.give.map((item) => ({ ...item, side: "Send" })), ...analysis.receive.map((item) => ({ ...item, side: "Receive" }))].map((item) => '<article class="trade-player-card"><small>' + item.side + '</small><h4>' + escapeHtml(item.name) + '</h4><small>' + item.position + ' · ' + escapeHtml(item.team || "FA") + ' · value ' + item.value.toFixed(1) + ' · ceiling ' + item.ceiling.toFixed(1) + '</small><div class="trade-factor">' + item.reasons.map((reason) => '<span>' + escapeHtml(reason.label) + '</span><strong>' + Math.round(reason.score) + '</strong><p>' + escapeHtml(reason.detail) + '</p>').join("") + '</div></article>').join("");
+  elements.tradeAnalysis.innerHTML = '<div class="trade-metric"><span>You send</span><strong>' + analysis.giveValue.toFixed(1) + '</strong></div><div class="trade-metric"><span>You receive</span><strong>' + analysis.receiveValue.toFixed(1) + '</strong></div><div class="trade-metric"><span>Lineup impact</span><strong>' + (analysis.lineupDelta >= 0 ? "+" : "") + analysis.lineupDelta.toFixed(1) + '/wk</strong></div><div class="trade-metric"><span>Fairness</span><strong>' + analysis.fairness + '%</strong></div><div class="trade-factor-grid">' + playerCards + '</div>';
+}
+
+function generateTradeIdeas() {
+  if (!tradeLeague) return;
+  const userId = elements.tradeUserRoster.value;
+  const myRoster = tradeRosterPlayers(userId);
+  const opponents = tradeLeague.rosters.filter((roster) => String(roster.roster_id) !== String(userId)).map((roster) => ({ id: roster.roster_id, name: tradeRosterName(roster.roster_id), roster: tradeRosterPlayers(roster.roster_id) }));
+  const suggestions = suggestTrades({ myRoster, opponents, context: tradeContext(), settings: state.settings, maxSuggestions: 10 });
+  elements.tradeSuggestions.innerHTML = suggestions.map((suggestion) => '<article class="trade-suggestion"><div><div class="trade-package">Send ' + suggestion.give.map((player) => escapeHtml(player.name)).join(" + ") + ' → Receive ' + suggestion.receive.map((player) => escapeHtml(player.name)).join(" + ") + '</div><p>' + escapeHtml(suggestion.opponent) + ' · ' + escapeHtml(suggestion.rationale) + '</p></div><div class="trade-score"><strong>+' + suggestion.analysis.adjustedDelta.toFixed(1) + '</strong><small>' + suggestion.analysis.fairness + '% fair</small></div></article>').join("") || '<div class="trade-empty">No clearly favorable, reasonably balanced packages were found from the current rosters.</div>';
+}
+
+async function loadTradeLeague() {
+  const leagueId = elements.tradeLeagueId.value.trim() || state.leagueImport?.leagueId || "";
+  if (!/^\d+$/.test(leagueId)) { elements.tradeDataFreshness.textContent = "Enter a valid Sleeper league ID."; return; }
+  elements.loadTradeLeagueButton.disabled = true;
+  elements.tradeDataFreshness.textContent = "Loading league rosters…";
+  try {
+    const [leagueResponse, rostersResponse, usersResponse] = await Promise.all([
+      fetch("https://api.sleeper.app/v1/league/" + leagueId),
+      fetch("https://api.sleeper.app/v1/league/" + leagueId + "/rosters"),
+      fetch("https://api.sleeper.app/v1/league/" + leagueId + "/users")
+    ]);
+    if (!leagueResponse.ok || !rostersResponse.ok || !usersResponse.ok) throw new Error("Sleeper league data could not be loaded");
+    const [league, rosters, users] = await Promise.all([leagueResponse.json(), rostersResponse.json(), usersResponse.json()]);
+    tradeLeague = { id: leagueId, league, rosters, users, usersById: Object.fromEntries(users.map((user) => [user.user_id, user])) };
+    elements.tradeLeagueId.value = leagueId;
+    renderTradeSelectors();
+    renderTradeBuilder();
+    const stamp = liveContext?.generatedAt ? new Date(liveContext.generatedAt) : null;
+    const ageHours = stamp ? (Date.now() - stamp.getTime()) / 3600000 : Infinity;
+    elements.tradeDataFreshness.textContent = (league.name || "Sleeper league") + " · player context " + (Number.isFinite(ageHours) ? ageHours.toFixed(1) + "h old" : "unavailable") + (liveContext?.teams ? " · schedule/team context active" : " · schedule context unavailable");
+  } catch (error) {
+    elements.tradeDataFreshness.textContent = "Trade league load failed: " + error.message;
+  } finally {
+    elements.loadTradeLeagueButton.disabled = false;
+  }
+}
+
+function openTradeAnalyzer() {
+  elements.tradeLeagueId.value = state.leagueImport?.leagueId || elements.tradeLeagueId.value || "";
+  const stamp = liveContext?.generatedAt ? new Date(liveContext.generatedAt) : null;
+  elements.tradeDataFreshness.textContent = stamp ? "Player context refreshed " + stamp.toLocaleString() : "Live context unavailable; using projection fallbacks.";
+  renderTradeBuilder();
+  elements.tradeDialog.showModal();
+  if (!tradeLeague && /^\d+$/.test(elements.tradeLeagueId.value)) void loadTradeLeague();
+}
+
 function openLeagueResults() { renderLeagueResults(); elements.leagueDialog.showModal(); logCurrentDraftInBackground(isComplete() ? "complete" : "in-progress"); }
 
 function toggleComparison(playerId) {
@@ -981,6 +1110,15 @@ elements.settingsButton.addEventListener("click", openSetup);
 elements.simulateButton.addEventListener("click", runToUserPick);
 elements.fullSimButton.addEventListener("click", simulateFullDraft);
 elements.viewLeagueButton.addEventListener("click", openLeagueResults);
+elements.tradeAnalyzerButton.addEventListener("click", openTradeAnalyzer);
+elements.closeTradeButton.addEventListener("click", () => elements.tradeDialog.close());
+elements.loadTradeLeagueButton.addEventListener("click", () => void loadTradeLeague());
+elements.tradeUserRoster.addEventListener("change", () => { localStorage.setItem("war-room-trade-user-roster", elements.tradeUserRoster.value); renderTradeOpponentOptions(); });
+elements.tradeOpponentRoster.addEventListener("change", () => { tradeSelection.receive.clear(); renderTradeBuilder(); renderTradeEvaluation(); });
+elements.tradeGiveSearch.addEventListener("input", renderTradeBuilder);
+elements.tradeReceiveSearch.addEventListener("input", renderTradeBuilder);
+elements.evaluateTradeButton.addEventListener("click", renderTradeEvaluation);
+elements.generateTradeSuggestionsButton.addEventListener("click", generateTradeIdeas);
 elements.closeLeagueButton.addEventListener("click", () => elements.leagueDialog.close());
 elements.closeCompareButton.addEventListener("click", () => elements.compareDialog.close());
 elements.compareButton.addEventListener("click", () => openComparison());
