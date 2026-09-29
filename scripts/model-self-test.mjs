@@ -6,7 +6,8 @@ import { createOpponentBeliefs, dominantOpponentStyle, evaluateRoster, normalize
 import { parseTradedPicks } from "../draft-setup.js";
 import { historicalCalibration, settingsFingerprint } from "../draft-audit.js";
 import { applyProviderProjections, DEFAULT_LEARNING_PROFILE, providerRosterGrades, updateLearningFromDraft } from "../provider-intelligence.js";
-import { normalizeFantasyProsProjection, normalizeSportsDataProjection } from "../provider-normalization.js";\nimport { evaluatePlayer, evaluateTrade, suggestTrades } from "../trade-engine.js";
+import { normalizeFantasyProsProjection, normalizeSportsDataProjection } from "../provider-normalization.js";
+import { evaluatePlayer, evaluateTrade, suggestTrades } from "../trade-engine.js";
 
 const ranks = replacementRanks(10, 15);
 assert.deepEqual(ranks, { QB: 12, RB: 32, WR: 35, TE: 13, K: 10, DST: 10 });
