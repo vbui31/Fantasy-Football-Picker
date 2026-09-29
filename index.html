@@ -25,7 +25,7 @@
         <span class="model-state" id="modelState">Registry model</span>
         <span class="save-state" id="saveState"><i></i> Saved locally</span>
         <button class="icon-button" id="undoButton" type="button" title="Undo last pick" aria-label="Undo last pick">↶</button>
-        <button class="button button-quiet header-results" id="viewLeagueButton" type="button">League Results</button>
+        <button class="button button-quiet" id="tradeAnalyzerButton" type="button">Trade Analyzer</button>\n        <button class="button button-quiet header-results" id="viewLeagueButton" type="button">League Results</button>
         <button class="button button-dark" id="settingsButton" type="button">Draft Setup</button>
       </div>
     </header>
@@ -145,6 +145,25 @@
       <div class="grader-audit" id="providerAudit" aria-live="polite"></div>
       <div class="league-grid" id="leagueGrid"></div>
       <div class="feedback-callout"><div><strong>See a Bad Pick?</strong><span>Share the round, roster context, and recommendation so the model can improve.</span></div><a class="button button-dark" href="https://github.com/vbui31/Fantasy-Football-Picker/issues/new?template=draft-feedback.yml" target="_blank" rel="noopener noreferrer">Send Feedback ↗</a></div>
+    </div>
+  </dialog>
+
+  <dialog id="tradeDialog" class="trade-dialog" aria-labelledby="tradeTitle">
+    <div class="trade-dialog-inner">
+      <div class="dialog-heading"><div><p class="eyebrow">Rest-of-season intelligence</p><h2 id="tradeTitle">Trade Analyzer</h2></div><button class="icon-button" id="closeTradeButton" type="button" aria-label="Close trade analyzer">×</button></div>
+      <div class="trade-league-bar">
+        <label>Sleeper league ID<input id="tradeLeagueId" inputmode="numeric" placeholder="Enter league ID"></label>
+        <button class="button button-dark" id="loadTradeLeagueButton" type="button">Load Rosters</button>
+        <label>Your team<select id="tradeUserRoster"></select></label>
+        <span id="tradeDataFreshness">Loading data status…</span>
+      </div>
+      <div class="trade-builder">
+        <section class="trade-side"><div class="section-heading compact"><div><p class="eyebrow">You send</p><h3>Outgoing</h3></div></div><input id="tradeGiveSearch" type="search" placeholder="Search your roster…"><div id="tradeGiveList" class="trade-player-list"></div></section>
+        <section class="trade-center"><div id="tradeVerdict" class="trade-verdict"><strong>Select players</strong><span>Choose assets on both sides to evaluate the deal.</span></div><button class="button button-gold" id="evaluateTradeButton" type="button">Evaluate Trade</button></section>
+        <section class="trade-side"><div class="section-heading compact"><div><p class="eyebrow">You receive</p><h3>Incoming</h3></div></div><select id="tradeOpponentRoster"></select><input id="tradeReceiveSearch" type="search" placeholder="Search opponent roster…"><div id="tradeReceiveList" class="trade-player-list"></div></section>
+      </div>
+      <div id="tradeAnalysis" class="trade-analysis"></div>
+      <section class="trade-suggestions"><div class="section-heading compact"><div><p class="eyebrow">Market ideas</p><h3>Suggested trades</h3></div><button class="button button-quiet" id="generateTradeSuggestionsButton" type="button">Generate Suggestions</button></div><div id="tradeSuggestions"></div></section>
     </div>
   </dialog>
 
