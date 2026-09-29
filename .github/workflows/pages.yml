@@ -32,7 +32,6 @@ jobs:
       - name: Verify decision model
         run: npm test
       - name: Refresh daily player context
-        if: github.event_name != 'push'
         run: npm run refresh:live
       - name: Refresh FantasyPros and SportsDataIO projections
         env:
