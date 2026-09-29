@@ -46,12 +46,14 @@ const sleeperPlayers = Object.assign({}, ...sleeperPositionMaps);
 const positionRecords = Object.fromEntries(sleeperPositions.map((position, index) => [position, Object.keys(sleeperPositionMaps[index]).length]));
 const currentSeason = Number(state.season);
 const statsSeason = Number(state.previous_season || currentSeason - 1);
-const [priorStatsText, currentStatsText] = await Promise.all([
+const [priorStatsText, currentStatsText, currentWeeklyText] = await Promise.all([
   maybeText("https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_reg_" + statsSeason + ".csv"),
-  maybeText("https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_reg_" + currentSeason + ".csv")
+  maybeText("https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_reg_" + currentSeason + ".csv"),
+  maybeText("https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_" + currentSeason + ".csv")
 ]);
 const priorStatsRows = priorStatsText ? parseCsv(priorStatsText) : [];
 const currentStatsRows = currentStatsText ? parseCsv(currentStatsText) : [];
+const currentWeeklyRows = currentWeeklyText ? parseCsv(currentWeeklyText).filter((row) => (row.season_type || "REG") === "REG") : [];
 const scheduleRows = parseCsv(scheduleText).filter((row) => Number(row.season) === currentSeason && (row.game_type || row.season_type || "REG") === "REG");
 const currentWeek = Number(state.week || 1);
 
@@ -64,8 +66,8 @@ const teams = {};
 const ensureTeam = (team) => {
   if (!team) return null;
   if (!teams[team]) teams[team] = {
-    offense: { games: 0, points: 0, pointsPerGame: null, passRate: null, offensiveTouchdownsPerGame: null },
-    defense: { games: 0, pointsAllowed: 0, pointsAllowedPerGame: null, fantasyAllowedIndex: {} },
+    offense: { games: 0, points: 0, pointsPerGame: null, passRate: null, offensiveTouchdownsPerGame: null, playsPerGame: null },
+    defense: { games: 0, pointsAllowed: 0, pointsAllowedPerGame: null, fantasyAllowedIndex: {}, fantasyAllowedPerGame: {} },
     remainingSchedule: []
   };
   return teams[team];
@@ -129,8 +131,39 @@ for (const [team, usage] of Object.entries(teamUsage)) {
   const plays = usage.attempts + usage.carries;
   teams[team].offense.passRate = plays ? Number((usage.attempts / plays).toFixed(4)) : null;
   const games = teams[team].offense.games || usage.games || Math.max(1, currentWeek - 1);
+  teams[team].offense.playsPerGame = games ? Number((plays / games).toFixed(2)) : null;
   const touchdowns = Math.max(usage.passingTds, usage.receivingTds) + usage.rushingTds;
   teams[team].offense.offensiveTouchdownsPerGame = games ? Number((touchdowns / games).toFixed(2)) : null;
+}
+
+const fantasyAllowed = {};
+const leagueAllowed = {};
+for (const row of currentWeeklyRows) {
+  const opponent = row.opponent_team;
+  const position = row.position;
+  const week = number(row.week);
+  const fantasy = number(row.fantasy_points_ppr);
+  if (!opponent || !["QB", "RB", "WR", "TE"].includes(position) || week === null || week >= currentWeek || fantasy === null) continue;
+  const key = opponent + ":" + position;
+  if (!fantasyAllowed[key]) fantasyAllowed[key] = { points: 0, games: new Set() };
+  fantasyAllowed[key].points += fantasy;
+  fantasyAllowed[key].games.add(week);
+  if (!leagueAllowed[position]) leagueAllowed[position] = { points: 0, games: new Set() };
+  leagueAllowed[position].points += fantasy;
+  leagueAllowed[position].games.add(String(opponent) + ":" + week);
+}
+for (const [team, record] of Object.entries(teams)) {
+  for (const position of ["QB", "RB", "WR", "TE"]) {
+    const entry = fantasyAllowed[team + ":" + position];
+    const league = leagueAllowed[position];
+    if (!entry?.games?.size || !league?.games?.size) continue;
+    const perGame = entry.points / entry.games.size;
+    const leaguePerGame = league.points / league.games.size;
+    record.defense.fantasyAllowedPerGame[position] = Number(perGame.toFixed(2));
+    record.defense.fantasyAllowedIndex[position] = leaguePerGame
+      ? Number(Math.max(-0.8, Math.min(0.8, perGame / leaguePerGame - 1)).toFixed(4))
+      : null;
+  }
 }
 
 const addsById = new Map(trendingAdds.map((entry) => [String(entry.player_id), Number(entry.count) || 0]));
@@ -157,6 +190,24 @@ function playerStats(row, season) {
     totalTouchdowns: sum(row, ["passing_tds", "rushing_tds", "receiving_tds", "special_teams_tds"])
   };
 }
+
+const weeklyByGsis = new Map();
+for (const row of currentWeeklyRows) {
+  const id = statId(row);
+  if (!id) continue;
+  if (!weeklyByGsis.has(id)) weeklyByGsis.set(id, []);
+  weeklyByGsis.get(id).push({
+    week: number(row.week),
+    opponent: row.opponent_team || null,
+    fantasyPointsPpr: number(row.fantasy_points_ppr),
+    carries: number(row.carries),
+    targets: number(row.targets),
+    receptions: number(row.receptions),
+    targetShare: number(row.target_share),
+    wopr: number(row.wopr)
+  });
+}
+for (const rows of weeklyByGsis.values()) rows.sort((a, b) => (a.week || 0) - (b.week || 0));
 
 const players = {};
 let sleeperMatched = 0;
@@ -193,7 +244,8 @@ for (const registryPlayer of registry.players) {
     trendingAdds: addsById.get(registryPlayer.id) || 0,
     trendingDrops: dropsById.get(registryPlayer.id) || 0,
     currentSeason: playerStats(currentStats, currentSeason),
-    lastSeason: playerStats(priorStats, statsSeason)
+    lastSeason: playerStats(priorStats, statsSeason),
+    weekly: gsisId ? (weeklyByGsis.get(gsisId) || []) : []
   };
 }
 
@@ -204,7 +256,7 @@ const context = {
   season: { season: currentSeason, week: currentWeek, seasonType: state.season_type || null, statsSeason },
   sources: [
     { name: "Sleeper NFL API", url: "https://docs.sleeper.com/#players", kind: "daily active player metadata, injuries, depth chart and 24-hour add/drop trends", cadence: "daily" },
-    { name: "nflverse player stats", url: "https://github.com/nflverse/nflverse-data/releases/tag/stats_player", kind: "current and prior regular-season player production", cadence: "release-driven" },
+    { name: "nflverse player stats", url: "https://github.com/nflverse/nflverse-data/releases/tag/stats_player", kind: "current/prior production plus current weekly logs and opponent-by-position fantasy allowance", cadence: "release-driven" },
     { name: "nflverse schedules", url: scheduleUrl, kind: "current schedule, scored games, remaining opponents and bye weeks", cadence: "release-driven" }
   ],
   quality: {
@@ -223,7 +275,7 @@ const context = {
     status: sleeperMatched / registryPlayers >= .8 ? "usable" : "degraded",
     limitations: [
       "Sleeper requests that player maps be fetched no more than once per day; this script caches for 20 hours.",
-      "Coverage-shell rates are intentionally not inferred from box scores. The trade engine only uses coverage data when an explicit coverageProfile is supplied.",
+      "Coverage-shell rates are intentionally not inferred from box scores. The trade engine only uses man/zone/two-high/blitz data when an explicit coverageProfile from a licensed or curated source is supplied.",
       "Current-season nflverse rows may lag the most recent game until the upstream release refreshes.",
       "Rookies and players without a GSIS identifier can have incomplete historical statistics."
     ]
