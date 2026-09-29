@@ -6,7 +6,7 @@ import { createOpponentBeliefs, dominantOpponentStyle, evaluateRoster, normalize
 import { parseTradedPicks } from "../draft-setup.js";
 import { historicalCalibration, settingsFingerprint } from "../draft-audit.js";
 import { applyProviderProjections, DEFAULT_LEARNING_PROFILE, providerRosterGrades, updateLearningFromDraft } from "../provider-intelligence.js";
-import { normalizeFantasyProsProjection, normalizeSportsDataProjection } from "../provider-normalization.js";
+import { normalizeFantasyProsProjection, normalizeSportsDataProjection } from "../provider-normalization.js";\nimport { evaluatePlayer, evaluateTrade, suggestTrades } from "../trade-engine.js";
 
 const ranks = replacementRanks(10, 15);
 assert.deepEqual(ranks, { QB: 12, RB: 32, WR: 35, TE: 13, K: 10, DST: 10 });
@@ -134,5 +134,28 @@ assert.equal(imported.matches, 2);
 assert.equal(imported.data.bijan.projection, 301.5, "weighted consensus should win over average");
 assert.equal(imported.data.bijan.standardDeviation, 16.4);
 assert.equal(imported.data.allen.expertRank, 8);
+
+const tradeContextFixture = {
+  season: { season: 2026, week: 5 },
+  teams: {
+    ATL: { offense: { pointsPerGame: 28, passRate: .54, offensiveTouchdownsPerGame: 3.2 }, defense: { pointsAllowedPerGame: 21 }, remainingSchedule: [{ week: 5, opponent: "CAR" }, { week: 6, opponent: "NO" }] },
+    CAR: { offense: { pointsPerGame: 19, passRate: .63, offensiveTouchdownsPerGame: 1.8 }, defense: { pointsAllowedPerGame: 29 }, remainingSchedule: [{ week: 5, opponent: "ATL" }] },
+    NO: { offense: { pointsPerGame: 22, passRate: .58, offensiveTouchdownsPerGame: 2.2 }, defense: { pointsAllowedPerGame: 25 }, remainingSchedule: [{ week: 5, opponent: "TB" }] }
+  },
+  players: {
+    "trade-rb": { depthChartOrder: 1, currentSeason: { games: 4, fantasyPointsPpr: 88, carries: 72, targets: 18, receptions: 15 }, trendingAdds: 400, trendingDrops: 30 },
+    "trade-wr": { depthChartOrder: 1, currentSeason: { games: 4, fantasyPointsPpr: 58, targets: 31, receptions: 20, targetShare: .24 }, trendingAdds: 40, trendingDrops: 120 }
+  }
+};
+const tradeRb = { id: "trade-rb", name: "Trade Runner", position: "RB", team: "ATL", projection: 285, age: 24, yearsExperience: 2, depthOrder: 1 };
+const tradeWr = { id: "trade-wr", name: "Trade Receiver", position: "WR", team: "CAR", projection: 230, age: 27, yearsExperience: 5, depthOrder: 1 };
+const tradeBench = { id: "trade-bench", name: "Bench Receiver", position: "WR", team: "NO", projection: 150, age: 23, yearsExperience: 1, depthOrder: 2 };
+const rbTradeValue = evaluatePlayer(tradeRb, tradeContextFixture);
+assert.ok(rbTradeValue.value > evaluatePlayer(tradeWr, tradeContextFixture).value, "current usage and strong offense should lift rest-of-season trade value");
+assert.equal(rbTradeValue.coverageAvailable, false, "coverage must not be invented when the source feed lacks coverage profiles");
+const tradeResult = evaluateTrade({ give: [tradeWr, tradeBench], receive: [tradeRb], myRoster: [tradeWr, tradeBench], context: tradeContextFixture, settings: pprSettings });
+assert.ok(Number.isFinite(tradeResult.adjustedDelta) && tradeResult.fairness >= 0 && tradeResult.fairness <= 100, "trade evaluation must return bounded fairness and finite roster-adjusted value");
+const tradeIdeas = suggestTrades({ myRoster: [tradeWr, tradeBench], opponents: [{ id: 2, name: "Opponent", roster: [tradeRb] }], context: tradeContextFixture, settings: pprSettings });
+assert.ok(Array.isArray(tradeIdeas), "trade suggestion engine must return a package list");
 
 console.log("Decision model self-test passed.");
